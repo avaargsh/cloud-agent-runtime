@@ -16,7 +16,12 @@ class AgentRunWorkflowState:
     approval_events: list[dict[str, Any]] = field(
         default_factory=list
     )
-    evidence_refs: list[str] = field(default_factory=list)
+    processed_approval_ids: set[str] = field(
+        default_factory=set
+    )
+    evidence_refs: list[str] = field(
+        default_factory=list
+    )
     result: dict[str, Any] | None = None
     error: str | None = None
 
@@ -25,8 +30,9 @@ class AgentRunWorkflowState:
 class AgentRunWorkflow:
     """Durable control-flow shell for a canonical runtime Run.
 
-    The runtime database remains the source of truth for product state.
-    Temporal owns durable waiting/retry/control-flow semantics.
+    Product state remains in the runtime store. Temporal owns durable
+    waiting and signal delivery. Signals are handled idempotently where
+    the caller supplies a stable domain identifier.
     """
 
     def __init__(self) -> None:
@@ -73,8 +79,23 @@ class AgentRunWorkflow:
         if self._state is None:
             return
 
+        approval_id = str(
+            payload.get("approval_id") or ""
+        )
+        if (
+            approval_id
+            and approval_id
+            in self._state.processed_approval_ids
+        ):
+            return
+
         event = dict(payload)
         self._state.approval_events.append(event)
+
+        if approval_id:
+            self._state.processed_approval_ids.add(
+                approval_id
+            )
 
         for ref in event.get(
             "evidence_refs",
