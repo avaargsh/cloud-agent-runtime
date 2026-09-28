@@ -43,6 +43,9 @@ def test_sqlite_round_trip_preserves_runtime_state(tmp_path: Path) -> None:
     approval = runtime.request_approval(
         run.run_id,
         action="merge pull request",
+        evidence_refs=[
+            "evidence://review/pr-1",
+        ],
     )
 
     # Re-open through a second store instance to prove persistence is not
@@ -59,5 +62,8 @@ def test_sqlite_round_trip_preserves_runtime_state(tmp_path: Path) -> None:
     assert loaded_run.workflow_ref is not None
     assert loaded_run.approvals[0].approval_id == approval.approval_id
     assert loaded_run.approvals[0].status == ApprovalStatus.PENDING
+    assert loaded_run.approvals[0].evidence_refs == (
+        "evidence://review/pr-1",
+    )
 
     reopened.close()
