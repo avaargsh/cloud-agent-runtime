@@ -33,6 +33,7 @@ class ApprovalStatus(str, Enum):
 class Approval:
     approval_id: str
     action: str
+    evidence_refs: tuple[str, ...] = ()
     status: ApprovalStatus = ApprovalStatus.PENDING
     actor: str | None = None
     reason: str | None = None
