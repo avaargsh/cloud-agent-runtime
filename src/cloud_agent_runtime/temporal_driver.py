@@ -31,7 +31,8 @@ class TemporalWorkflowDriver:
             from temporalio.client import Client
         except ImportError as exc:
             raise RuntimeError(
-                'install Temporal support with: pip install -e ".[temporal]"'
+                'install Temporal support with: '
+                'pip install -e ".[temporal]"'
             ) from exc
 
         client = await Client.connect(
@@ -46,8 +47,14 @@ class TemporalWorkflowDriver:
             workflow_id_prefix=workflow_id_prefix,
         )
 
-    def workflow_id_for(self, runtime_run_id: str) -> str:
-        return f"{self.workflow_id_prefix}-{runtime_run_id}"
+    def workflow_id_for(
+        self,
+        runtime_run_id: str,
+    ) -> str:
+        return (
+            f"{self.workflow_id_prefix}-"
+            f"{runtime_run_id}"
+        )
 
     async def start_run(
         self,
@@ -55,19 +62,39 @@ class TemporalWorkflowDriver:
         runtime_run_id: str,
         session_id: str,
     ) -> WorkflowRef:
-        workflow_id = self.workflow_id_for(runtime_run_id)
-
-        handle = await self.client.start_workflow(
-            self.workflow_type,
-            args=[
-                {
-                    "runtime_run_id": runtime_run_id,
-                    "session_id": session_id,
-                }
-            ],
-            id=workflow_id,
-            task_queue=self.task_queue,
+        workflow_id = self.workflow_id_for(
+            runtime_run_id
         )
+
+        try:
+            handle = await self.client.start_workflow(
+                self.workflow_type,
+                args=[
+                    {
+                        "runtime_run_id": runtime_run_id,
+                        "session_id": session_id,
+                    }
+                ],
+                id=workflow_id,
+                task_queue=self.task_queue,
+            )
+        except Exception as exc:
+            try:
+                from temporalio.client import (
+                    WorkflowAlreadyStartedError,
+                )
+            except ImportError:
+                WorkflowAlreadyStartedError = ()  # type: ignore
+
+            if not isinstance(
+                exc,
+                WorkflowAlreadyStartedError,
+            ):
+                raise
+
+            handle = self.client.get_workflow_handle(
+                workflow_id
+            )
 
         return WorkflowRef(
             provider=self.name,
