@@ -4,6 +4,15 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Mapping
 
+from .contracts import (
+    Approval,
+    ArtifactRef,
+    Budget,
+    CapabilityBinding,
+    EvidenceRef,
+)
+from .workflow import WorkflowRef
+
 
 class SessionStatus(str, Enum):
     ACTIVE = "active"
@@ -14,6 +23,7 @@ class SessionStatus(str, Enum):
 class RunStatus(str, Enum):
     CREATED = "created"
     RUNNING = "running"
+    WAITING_APPROVAL = "waiting_approval"
     PAUSED = "paused"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
@@ -28,6 +38,7 @@ class Session:
     status: SessionStatus = SessionStatus.ACTIVE
     provider_refs: dict[str, str] = field(default_factory=dict)
     state_refs: dict[str, str] = field(default_factory=dict)
+    capability_bindings: dict[str, CapabilityBinding] = field(default_factory=dict)
 
 
 @dataclass
@@ -36,6 +47,10 @@ class Run:
     session_id: str
     status: RunStatus = RunStatus.CREATED
     sandbox_ref: str | None = None
-    artifact_refs: list[str] = field(default_factory=list)
-    evidence_refs: list[str] = field(default_factory=list)
+    sandbox_snapshot_ref: str | None = None
+    workflow_ref: WorkflowRef | None = None
+    artifact_refs: list[ArtifactRef | str] = field(default_factory=list)
+    evidence_refs: list[EvidenceRef | str] = field(default_factory=list)
+    approvals: list[Approval] = field(default_factory=list)
+    budget: Budget | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
