@@ -20,6 +20,7 @@ from .sandbox import (
     SandboxStatus,
 )
 from .store import InMemoryStore, SQLiteStore
+from .temporal_bridge import TemporalRunBridge, TemporalRunStatus
 from .temporal_driver import TemporalWorkflowDriver
 from .workflow import InMemoryWorkflowDriver, WorkflowRef
 
@@ -45,6 +46,8 @@ __all__ = [
     "SandboxStatus",
     "Session",
     "SessionStatus",
+    "TemporalRunBridge",
+    "TemporalRunStatus",
     "TemporalWorkflowDriver",
     "WorkflowRef",
 ]
