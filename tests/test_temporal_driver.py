@@ -25,6 +25,7 @@ class FakeClient:
         args,
         id,
         task_queue,
+        id_reuse_policy,
     ):
         self.started.append(
             {
@@ -32,6 +33,7 @@ class FakeClient:
                 "args": args,
                 "id": id,
                 "task_queue": task_queue,
+                "id_reuse_policy": id_reuse_policy,
             }
         )
         return self.handle
@@ -42,6 +44,8 @@ class FakeClient:
 
 def test_temporal_driver_uses_canonical_runtime_run_id() -> None:
     async def scenario():
+        from temporalio.common import WorkflowIDReusePolicy
+
         client = FakeClient()
         driver = TemporalWorkflowDriver(
             client=client,
@@ -58,6 +62,7 @@ def test_temporal_driver_uses_canonical_runtime_run_id() -> None:
         assert ref.run_id == "temporal-run-1"
         assert client.started[0]["task_queue"] == "agent-runs"
         assert client.started[0]["args"][0]["session_id"] == "session-456"
+        assert client.started[0]["id_reuse_policy"] is WorkflowIDReusePolicy.REJECT_DUPLICATE
 
         await driver.signal(
             ref,
@@ -74,7 +79,7 @@ def test_temporal_driver_uses_canonical_runtime_run_id() -> None:
     asyncio.run(scenario())
 
 
-def test_temporal_driver_attaches_when_workflow_already_started(monkeypatch) -> None:
+def test_temporal_driver_attaches_when_workflow_id_already_exists() -> None:
     async def scenario():
         from temporalio.exceptions import WorkflowAlreadyStartedError
 

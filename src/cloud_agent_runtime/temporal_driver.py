@@ -67,6 +67,15 @@ class TemporalWorkflowDriver:
         )
 
         try:
+            from temporalio.common import WorkflowIDReusePolicy
+            from temporalio.exceptions import WorkflowAlreadyStartedError
+        except ImportError as exc:
+            raise RuntimeError(
+                'install Temporal support with: '
+                'pip install -e ".[temporal]"'
+            ) from exc
+
+        try:
             handle = await self.client.start_workflow(
                 self.workflow_type,
                 args=[
@@ -77,21 +86,13 @@ class TemporalWorkflowDriver:
                 ],
                 id=workflow_id,
                 task_queue=self.task_queue,
+                id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
             )
-        except Exception as exc:
-            try:
-                from temporalio.exceptions import (
-                    WorkflowAlreadyStartedError,
-                )
-            except ImportError:
-                WorkflowAlreadyStartedError = ()  # type: ignore
-
-            if not isinstance(
-                exc,
-                WorkflowAlreadyStartedError,
-            ):
-                raise
-
+        except WorkflowAlreadyStartedError:
+            # Canonical runtime_run_id maps to exactly one Temporal workflow
+            # execution, including after that execution has reached a terminal
+            # state. REJECT_DUPLICATE prevents a later status/attach call from
+            # silently creating a fresh workflow with empty state.
             handle = self.client.get_workflow_handle(
                 workflow_id
             )

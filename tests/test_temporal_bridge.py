@@ -30,7 +30,7 @@ class FakeClient:
     def __init__(self):
         self.handle = FakeHandle()
 
-    async def start_workflow(self, workflow_type, *, args, id, task_queue):
+    async def start_workflow(self, workflow_type, *, args, id, task_queue, id_reuse_policy):
         return self.handle
 
     def get_workflow_handle(self, workflow_id, **kwargs):
