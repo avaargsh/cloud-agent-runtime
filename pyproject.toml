@@ -11,10 +11,16 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
-temporal = [
-  "temporalio>=1.29,<2",
+dev = [
+  "pytest>=8.0",
+  "temporalio>=1.33,<2",
 ]
+temporal = [
+  "temporalio>=1.33,<2",
+]
+
+[project.scripts]
+cloud-agent-runtime-worker = "cloud_agent_runtime.temporal_worker:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
