@@ -80,7 +80,7 @@ class TemporalWorkflowDriver:
             )
         except Exception as exc:
             try:
-                from temporalio.client import (
+                from temporalio.exceptions import (
                     WorkflowAlreadyStartedError,
                 )
             except ImportError:
