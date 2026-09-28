@@ -38,6 +38,27 @@ def test_approval_signal_preserves_evidence() -> None:
     assert len(state["approval_events"]) == 1
 
 
+def test_duplicate_approval_signal_is_idempotent() -> None:
+    workflow = initialized_workflow()
+    payload = {
+        "approval_id": "approval-1",
+        "approved": True,
+        "actor": "operator@example",
+        "evidence_refs": [
+            "evidence://aiops/e-1",
+        ],
+    }
+
+    workflow.approval_resolved(payload)
+    workflow.approval_resolved(payload)
+
+    state = workflow.run_state()
+    assert len(state["approval_events"]) == 1
+    assert state["evidence_refs"] == [
+        "evidence://aiops/e-1",
+    ]
+
+
 def test_denied_approval_is_terminal() -> None:
     workflow = initialized_workflow()
 
