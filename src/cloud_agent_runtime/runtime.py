@@ -12,7 +12,7 @@ from .contracts import (
 )
 from .models import Run, RunStatus, Session, SessionStatus
 from .sandbox import Sandbox, SandboxProvider
-from .store import InMemoryStore
+from .store import InMemoryStore, RuntimeStore
 from .workflow import WorkflowDriver
 
 
@@ -21,7 +21,7 @@ class AgentRuntime:
 
     def __init__(
         self,
-        store: InMemoryStore | None = None,
+        store: RuntimeStore | None = None,
         *,
         sandbox_provider: SandboxProvider | None = None,
         workflow_driver: WorkflowDriver | None = None,
