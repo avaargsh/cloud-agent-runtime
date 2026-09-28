@@ -31,7 +31,11 @@
 - [ ] retry / idempotency policy
 - [x] approval wait states
 - [x] sandbox snapshot / resume
-- [ ] Temporal worker reference workflow
+- [x] Temporal Worker reference workflow
+- [x] stable AgentRunWorkflow name
+- [x] approval / pause / resume / complete / fail signals
+- [x] run_state query
+- [x] worker CLI
 - [ ] Temporal test environment integration
 
 ## v0.4 — Kubernetes scale
