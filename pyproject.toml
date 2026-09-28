@@ -12,6 +12,9 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+temporal = [
+  "temporalio>=1.29,<2",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
