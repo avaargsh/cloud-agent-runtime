@@ -11,8 +11,10 @@
 - [x] workflow reference contract
 
 ## v0.2 — Local runtime
-- [ ] SQLite/PostgreSQL store adapter
-- [ ] object-store artifact adapter
+- [x] SQLite reference store
+- [ ] PostgreSQL store adapter
+- [x] local filesystem artifact store
+- [ ] S3-compatible object-store adapter
 - [x] sandbox provider interface
 - [x] in-memory sandbox allocate/bind/snapshot/resume
 - [ ] harness provider interface
@@ -20,12 +22,17 @@
 - [ ] OpenTelemetry traces
 
 ## v0.3 — Durable workflow
-- [ ] Temporal-backed Run lifecycle
-- [x] provider-neutral workflow driver
+- [x] async runtime path
+- [x] Temporal Python client adapter
+- [x] deterministic Temporal Workflow ID from canonical Run ID
+- [x] approval resolution signal
+- [x] provider-neutral sync/async workflow contracts
 - [x] run pause / resume
-- [ ] retry and idempotency
+- [ ] retry / idempotency policy
 - [x] approval wait states
 - [x] sandbox snapshot / resume
+- [ ] Temporal worker reference workflow
+- [ ] Temporal test environment integration
 
 ## v0.4 — Kubernetes scale
 - [ ] warm sandbox pool
