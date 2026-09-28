@@ -35,6 +35,10 @@ def test_async_runtime_starts_workflow_and_signals_approval() -> None:
         approval = runtime.request_approval(
             run.run_id,
             action="restart workload",
+            evidence_refs=[
+                "evidence://incident/e-1",
+                "evidence://incident/e-2",
+            ],
         )
         resolved = await runtime.resolve_approval(
             run.run_id,
@@ -44,7 +48,15 @@ def test_async_runtime_starts_workflow_and_signals_approval() -> None:
         )
 
         assert resolved.status == ApprovalStatus.APPROVED
+        assert resolved.evidence_refs == (
+            "evidence://incident/e-1",
+            "evidence://incident/e-2",
+        )
         assert driver.signals[0][1] == "approval_resolved"
+        assert driver.signals[0][2]["evidence_refs"] == [
+            "evidence://incident/e-1",
+            "evidence://incident/e-2",
+        ]
 
     asyncio.run(scenario())
 
