@@ -1,3 +1,4 @@
+from .artifact_store import LocalArtifactStore
 from .contracts import (
     Approval,
     ApprovalStatus,
@@ -13,6 +14,7 @@ from .sandbox import (
     Sandbox,
     SandboxStatus,
 )
+from .store import InMemoryStore, SQLiteStore
 from .workflow import InMemoryWorkflowDriver, WorkflowRef
 
 __all__ = [
@@ -24,9 +26,12 @@ __all__ = [
     "CapabilityBinding",
     "EvidenceRef",
     "InMemorySandboxProvider",
+    "InMemoryStore",
     "InMemoryWorkflowDriver",
+    "LocalArtifactStore",
     "Run",
     "RunStatus",
+    "SQLiteStore",
     "Sandbox",
     "SandboxStatus",
     "Session",
