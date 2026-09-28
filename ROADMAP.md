@@ -36,7 +36,8 @@
 - [x] approval / pause / resume / complete / fail signals
 - [x] run_state query
 - [x] worker CLI
-- [ ] Temporal test environment integration
+- [x] Temporal test environment integration
+- [x] Worker + Signal + Query + Result integration test
 
 ## v0.4 — Kubernetes scale
 - [ ] warm sandbox pool
