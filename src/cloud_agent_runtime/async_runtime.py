@@ -87,6 +87,9 @@ class AsyncAgentRuntime(AgentRuntime):
                     "approved": approved,
                     "actor": actor,
                     "reason": reason,
+                    "evidence_refs": list(
+                        approval.evidence_refs
+                    ),
                 },
             )
 
