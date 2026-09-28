@@ -5,24 +5,27 @@
 - [x] Run model
 - [x] provider/state references
 - [x] minimal local lifecycle
-- [ ] ArtifactRef / EvidenceRef types
-- [ ] approval / budget model
-- [ ] capability binding model
+- [x] ArtifactRef / EvidenceRef types
+- [x] approval / budget model
+- [x] capability binding model
+- [x] workflow reference contract
 
 ## v0.2 — Local runtime
 - [ ] SQLite/PostgreSQL store adapter
 - [ ] object-store artifact adapter
-- [ ] sandbox provider interface
+- [x] sandbox provider interface
+- [x] in-memory sandbox allocate/bind/snapshot/resume
 - [ ] harness provider interface
-- [ ] MCP capability binding
+- [x] capability binding contract
 - [ ] OpenTelemetry traces
 
 ## v0.3 — Durable workflow
 - [ ] Temporal-backed Run lifecycle
-- [ ] pause / resume
+- [x] provider-neutral workflow driver
+- [x] run pause / resume
 - [ ] retry and idempotency
-- [ ] approval wait states
-- [ ] sandbox snapshot / resume
+- [x] approval wait states
+- [x] sandbox snapshot / resume
 
 ## v0.4 — Kubernetes scale
 - [ ] warm sandbox pool
