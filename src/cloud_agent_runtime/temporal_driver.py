@@ -124,3 +124,24 @@ class TemporalWorkflowDriver:
             )
 
         await handle.signal(name, payload)
+
+    async def query(
+        self,
+        workflow: WorkflowRef,
+        *,
+        name: str,
+        args: object | None = None,
+    ) -> Any:
+        if workflow.run_id is not None:
+            handle = self.client.get_workflow_handle(
+                workflow.workflow_id,
+                run_id=workflow.run_id,
+            )
+        else:
+            handle = self.client.get_workflow_handle(
+                workflow.workflow_id,
+            )
+
+        if args is None:
+            return await handle.query(name)
+        return await handle.query(name, args)
