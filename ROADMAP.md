@@ -25,10 +25,12 @@
 - [x] async runtime path
 - [x] Temporal Python client adapter
 - [x] deterministic Temporal Workflow ID from canonical Run ID
+- [x] WorkflowAlreadyStarted attach/reuse semantics
 - [x] approval resolution signal
+- [x] approval signal deduplication by approval_id
 - [x] provider-neutral sync/async workflow contracts
 - [x] run pause / resume
-- [ ] retry / idempotency policy
+- [x] retry / idempotency policy baseline
 - [x] approval wait states
 - [x] sandbox snapshot / resume
 - [x] Temporal Worker reference workflow
