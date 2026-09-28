@@ -2,15 +2,34 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+from .contracts import (
+    Approval,
+    ApprovalStatus,
+    ArtifactRef,
+    Budget,
+    CapabilityBinding,
+    EvidenceRef,
+)
 from .models import Run, RunStatus, Session, SessionStatus
+from .sandbox import Sandbox, SandboxProvider
 from .store import InMemoryStore
+from .workflow import WorkflowDriver
 
 
 class AgentRuntime:
-    """Minimal reference state machine for Session and Run lifecycle."""
+    """Reference Session/Run state machine with pluggable workflow and sandbox."""
 
-    def __init__(self, store: InMemoryStore | None = None) -> None:
+    def __init__(
+        self,
+        store: InMemoryStore | None = None,
+        *,
+        sandbox_provider: SandboxProvider | None = None,
+        workflow_driver: WorkflowDriver | None = None,
+    ) -> None:
         self.store = store or InMemoryStore()
+        self.sandbox_provider = sandbox_provider
+        self.workflow_driver = workflow_driver
+        self._sandboxes: dict[str, Sandbox] = {}
 
     def create_session(
         self,
@@ -18,12 +37,17 @@ class AgentRuntime:
         agent_id: str,
         release_id: str,
         tenant_id: str,
+        capabilities: list[CapabilityBinding] | None = None,
     ) -> Session:
         session = Session(
             session_id=str(uuid4()),
             agent_id=agent_id,
             release_id=release_id,
             tenant_id=tenant_id,
+            capability_bindings={
+                item.name: item
+                for item in (capabilities or [])
+            },
         )
         self.store.save_session(session)
         return session
@@ -33,17 +57,149 @@ class AgentRuntime:
         *,
         session_id: str,
         sandbox_ref: str | None = None,
+        budget: Budget | None = None,
     ) -> Run:
         session = self.store.get_session(session_id)
         if session.status != SessionStatus.ACTIVE:
             raise ValueError("runs can only start on an active session")
 
+        run_id = str(uuid4())
+        workflow_ref = None
+
+        if self.workflow_driver is not None:
+            workflow_ref = self.workflow_driver.start_run(
+                runtime_run_id=run_id,
+                session_id=session_id,
+            )
+
         run = Run(
-            run_id=str(uuid4()),
+            run_id=run_id,
             session_id=session_id,
             status=RunStatus.RUNNING,
             sandbox_ref=sandbox_ref,
+            workflow_ref=workflow_ref,
+            budget=budget,
         )
+
+        if sandbox_ref is None and self.sandbox_provider is not None:
+            sandbox = self.sandbox_provider.allocate()
+            sandbox = self.sandbox_provider.bind(
+                sandbox,
+                session_id=session_id,
+            )
+            self._sandboxes[run_id] = sandbox
+            run.sandbox_ref = (
+                f"sandbox://{sandbox.provider}/{sandbox.sandbox_id}"
+            )
+
+        self.store.save_run(run)
+        return run
+
+    def request_approval(
+        self,
+        run_id: str,
+        *,
+        action: str,
+    ) -> Approval:
+        run = self.store.get_run(run_id)
+        if run.status != RunStatus.RUNNING:
+            raise ValueError("approval can only be requested by a running run")
+
+        approval = Approval(
+            approval_id=str(uuid4()),
+            action=action,
+        )
+        run.approvals.append(approval)
+        run.status = RunStatus.WAITING_APPROVAL
+        self.store.save_run(run)
+        return approval
+
+    def resolve_approval(
+        self,
+        run_id: str,
+        approval_id: str,
+        *,
+        approved: bool,
+        actor: str,
+        reason: str | None = None,
+    ) -> Approval:
+        run = self.store.get_run(run_id)
+
+        approval = next(
+            (
+                item
+                for item in run.approvals
+                if item.approval_id == approval_id
+            ),
+            None,
+        )
+        if approval is None:
+            raise KeyError(f"unknown approval: {approval_id}")
+        if approval.status != ApprovalStatus.PENDING:
+            raise ValueError("approval is already resolved")
+
+        approval.status = (
+            ApprovalStatus.APPROVED
+            if approved
+            else ApprovalStatus.DENIED
+        )
+        approval.actor = actor
+        approval.reason = reason
+
+        run.status = (
+            RunStatus.RUNNING
+            if approved
+            else RunStatus.FAILED
+        )
+        self.store.save_run(run)
+
+        if self.workflow_driver is not None and run.workflow_ref is not None:
+            self.workflow_driver.signal(
+                run.workflow_ref,
+                name="approval_resolved",
+                payload={
+                    "approval_id": approval_id,
+                    "approved": approved,
+                    "actor": actor,
+                },
+            )
+
+        return approval
+
+    def pause_run(self, run_id: str) -> Run:
+        run = self.store.get_run(run_id)
+        if run.status != RunStatus.RUNNING:
+            raise ValueError("only a running run can be paused")
+
+        if self.sandbox_provider is not None and run_id in self._sandboxes:
+            sandbox = self.sandbox_provider.snapshot(
+                self._sandboxes[run_id]
+            )
+            run.sandbox_snapshot_ref = sandbox.snapshot_ref
+
+        run.status = RunStatus.PAUSED
+        self.store.save_run(run)
+        return run
+
+    def resume_run(self, run_id: str) -> Run:
+        run = self.store.get_run(run_id)
+        if run.status != RunStatus.PAUSED:
+            raise ValueError("only a paused run can be resumed")
+
+        if (
+            self.sandbox_provider is not None
+            and run.sandbox_snapshot_ref is not None
+        ):
+            sandbox = self.sandbox_provider.resume(
+                run.sandbox_snapshot_ref,
+                session_id=run.session_id,
+            )
+            self._sandboxes[run_id] = sandbox
+            run.sandbox_ref = (
+                f"sandbox://{sandbox.provider}/{sandbox.sandbox_id}"
+            )
+
+        run.status = RunStatus.RUNNING
         self.store.save_run(run)
         return run
 
@@ -65,8 +221,8 @@ class AgentRuntime:
         self,
         run_id: str,
         *,
-        artifact_refs: list[str] | None = None,
-        evidence_refs: list[str] | None = None,
+        artifact_refs: list[ArtifactRef | str] | None = None,
+        evidence_refs: list[EvidenceRef | str] | None = None,
     ) -> Run:
         run = self.store.get_run(run_id)
         if run.status != RunStatus.RUNNING:
