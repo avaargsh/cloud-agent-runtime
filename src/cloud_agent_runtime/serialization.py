@@ -120,6 +120,7 @@ def run_to_dict(run: Run) -> dict[str, Any]:
             {
                 "approval_id": approval.approval_id,
                 "action": approval.action,
+                "evidence_refs": list(approval.evidence_refs),
                 "status": approval.status.value,
                 "actor": approval.actor,
                 "reason": approval.reason,
@@ -167,6 +168,7 @@ def run_from_dict(data: dict[str, Any]) -> Run:
             Approval(
                 approval_id=value["approval_id"],
                 action=value["action"],
+                evidence_refs=tuple(value.get("evidence_refs", ())),
                 status=ApprovalStatus(value["status"]),
                 actor=value.get("actor"),
                 reason=value.get("reason"),
