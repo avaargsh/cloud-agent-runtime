@@ -81,7 +81,7 @@ def test_temporal_driver_attaches_when_workflow_already_started(monkeypatch) -> 
         client = FakeClient()
 
         async def already_started(*args, **kwargs):
-            raise WorkflowAlreadyStartedError("already started", "agent-run-run-123", "temporal-run-existing")
+            raise WorkflowAlreadyStartedError("agent-run-run-123", "temporal-run-existing")
 
         client.start_workflow = already_started
         driver = TemporalWorkflowDriver(client=client, task_queue="agent-runs")
