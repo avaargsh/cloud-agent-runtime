@@ -100,6 +100,7 @@ class AgentRuntime:
         run_id: str,
         *,
         action: str,
+        evidence_refs: list[str] | tuple[str, ...] | None = None,
     ) -> Approval:
         run = self.store.get_run(run_id)
         if run.status != RunStatus.RUNNING:
@@ -108,6 +109,7 @@ class AgentRuntime:
         approval = Approval(
             approval_id=str(uuid4()),
             action=action,
+            evidence_refs=tuple(evidence_refs or ()),
         )
         run.approvals.append(approval)
         run.status = RunStatus.WAITING_APPROVAL
@@ -161,6 +163,8 @@ class AgentRuntime:
                     "approval_id": approval_id,
                     "approved": approved,
                     "actor": actor,
+                    "reason": reason,
+                    "evidence_refs": list(approval.evidence_refs),
                 },
             )
 
