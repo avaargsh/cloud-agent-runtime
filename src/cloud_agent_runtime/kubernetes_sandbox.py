@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Callable
 from uuid import uuid4
 
 from .sandbox import Sandbox, SandboxStatus
