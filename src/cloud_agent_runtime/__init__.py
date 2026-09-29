@@ -13,6 +13,14 @@ from .contracts import (
     EvidenceRef,
 )
 from .models import Run, RunStatus, Session, SessionStatus
+from .lifecycle_binding import (
+    BindingPhase,
+    BindingValidationError,
+    LifecycleBinding,
+    LifecycleBindingAdapter,
+    RestoreRequest,
+    SandboxLifecycleBindingAdapter,
+)
 from .runtime import AgentRuntime
 from .sandbox import (
     InMemorySandboxProvider,
@@ -39,6 +47,12 @@ __all__ = [
     "InMemoryStore",
     "InMemoryWorkflowDriver",
     "LocalArtifactStore",
+    "BindingPhase",
+    "BindingValidationError",
+    "LifecycleBinding",
+    "LifecycleBindingAdapter",
+    "RestoreRequest",
+    "SandboxLifecycleBindingAdapter",
     "Run",
     "RunStatus",
     "SQLiteStore",
