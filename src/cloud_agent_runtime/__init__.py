@@ -12,6 +12,7 @@ from .contracts import (
     CapabilityBinding,
     EvidenceRef,
 )
+from .kubernetes_sandbox import KubernetesSandboxProvider
 from .models import Run, RunStatus, Session, SessionStatus
 from .runtime import AgentRuntime
 from .sandbox import (
@@ -38,6 +39,7 @@ __all__ = [
     "InMemorySandboxProvider",
     "InMemoryStore",
     "InMemoryWorkflowDriver",
+    "KubernetesSandboxProvider",
     "LocalArtifactStore",
     "Run",
     "RunStatus",
