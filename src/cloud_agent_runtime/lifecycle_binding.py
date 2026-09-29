@@ -144,6 +144,10 @@ class SandboxLifecycleBindingAdapter:
             binding.workspace_ref,
             session_id=binding.session_id,
         )
+        if sandbox.provider != binding.sandbox_provider:
+            raise BindingValidationError("sandbox provider mismatch after restore")
+        if sandbox.session_id != binding.session_id:
+            raise BindingValidationError("sandbox session mismatch after restore")
         return replace(
             binding,
             physical_sandbox_ref=sandbox.sandbox_id,
