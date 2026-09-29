@@ -167,16 +167,27 @@ def test_sandbox_rebind_preserves_run_and_workflow_identity() -> None:
     original_workflow_ref = run.workflow_ref
     original_sandbox_ref = run.sandbox_ref
 
-    paused = rt.pause_run(run.run_id)
-    snapshot_ref = paused.sandbox_snapshot_ref
-    assert snapshot_ref is not None
-
-    rebound = rt.rebind_run_sandbox(
-        run.run_id,
-        snapshot_ref=snapshot_ref,
-    )
+    current = rt._sandboxes[run.run_id]\n    snapshotted = rt.sandbox_provider.snapshot(current)\n    snapshot_ref = snapshotted.snapshot_ref\n    assert snapshot_ref is not None\n\n    # Rebind is a running-run execution replacement. Paused recovery is\n    # intentionally owned by resume_run().\n    current.status = current.status.BOUND\n    rebound = rt.rebind_run_sandbox(\n        run.run_id,\n        snapshot_ref=snapshot_ref,\n    )
 
     assert rebound.run_id == original_run_id
     assert rebound.workflow_ref == original_workflow_ref
     assert rebound.sandbox_ref != original_sandbox_ref
     assert rebound.sandbox_snapshot_ref == snapshot_ref
+
+
+
+def test_paused_run_must_use_resume_not_rebind() -> None:
+    rt = runtime()
+    session = rt.create_session(
+        agent_id="coding-agent",
+        release_id="coding-agent-v1",
+        tenant_id="tenant-a",
+    )
+    run = rt.start_run(session_id=session.session_id)
+    rt.pause_run(run.run_id)
+
+    with pytest.raises(
+        ValueError,
+        match="use resume_run for paused recovery",
+    ):
+        rt.rebind_run_sandbox(run.run_id)
