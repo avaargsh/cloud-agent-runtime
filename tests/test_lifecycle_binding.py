@@ -182,3 +182,23 @@ def test_restore_rejects_workspace_provenance_drift():
                 idempotency_key="op-1",
             ),
         )
+
+
+
+def test_lifecycle_binding_preserves_control_plane_run_identity():
+    adapter = SandboxLifecycleBindingAdapter(InMemorySandboxProvider())
+    run_id = "golden-checkout-live-001"
+    release_ref = "release://sre-rca-agent-v1"
+
+    binding = adapter.bind(
+        workflow_ref=f"temporal://{run_id}",
+        session_id=run_id,
+        release_id=release_ref,
+        idempotency_key=f"run://{run_id}",
+    )
+
+    assert binding.workflow_ref == f"temporal://{run_id}"
+    assert binding.session_id == run_id
+    assert binding.release_id == release_ref
+    assert binding.logical_sandbox_ref == f"sandbox://{run_id}"
+    assert binding.idempotency_key == f"run://{run_id}"
