@@ -207,6 +207,46 @@ class AgentRuntime:
         self.store.save_run(run)
         return run
 
+    def rebind_run_sandbox(
+        self,
+        run_id: str,
+        *,
+        snapshot_ref: str | None = None,
+    ) -> Run:
+        """Replace sandbox execution while preserving canonical Run/Workflow identity."""
+        run = self.store.get_run(run_id)
+        if run.status not in {RunStatus.RUNNING, RunStatus.PAUSED}:
+            raise ValueError("sandbox can only be rebound for an active run")
+        if self.sandbox_provider is None:
+            raise ValueError("sandbox provider is required for rebind")
+
+        previous = self._sandboxes.get(run_id)
+        restore_ref = snapshot_ref or run.sandbox_snapshot_ref
+
+        if restore_ref is not None:
+            sandbox = self.sandbox_provider.resume(
+                restore_ref,
+                session_id=run.session_id,
+            )
+            run.sandbox_snapshot_ref = restore_ref
+        else:
+            sandbox = self.sandbox_provider.allocate()
+            sandbox = self.sandbox_provider.bind(
+                sandbox,
+                session_id=run.session_id,
+            )
+
+        self._sandboxes[run_id] = sandbox
+        run.sandbox_ref = (
+            f"sandbox://{sandbox.provider}/{sandbox.sandbox_id}"
+        )
+        self.store.save_run(run)
+
+        if previous is not None and previous is not sandbox:
+            self.sandbox_provider.terminate(previous)
+
+        return run
+
     def pause_session(self, session_id: str) -> Session:
         session = self.store.get_session(session_id)
         session.status = SessionStatus.PAUSED
