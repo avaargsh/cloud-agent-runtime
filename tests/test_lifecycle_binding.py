@@ -147,3 +147,38 @@ def test_restore_rejects_replacement_sandbox_with_wrong_identity(provider, messa
                 idempotency_key="op-1",
             ),
         )
+
+
+
+class WrongWorkspaceProvider(InMemorySandboxProvider):
+    def resume(self, snapshot_ref: str, *, session_id: str):
+        sandbox = super().resume(snapshot_ref, session_id=session_id)
+        return sandbox.__class__(
+            sandbox_id=sandbox.sandbox_id,
+            provider=sandbox.provider,
+            status=sandbox.status,
+            snapshot_ref="snapshot://wrong-workspace",
+            session_id=sandbox.session_id,
+        )
+
+
+def test_restore_rejects_workspace_provenance_drift():
+    adapter = SandboxLifecycleBindingAdapter(WrongWorkspaceProvider())
+    binding = adapter.bind(
+        workflow_ref="temporal://run-381",
+        session_id="session-1",
+        release_id="candidate-v7",
+        idempotency_key="op-1",
+    )
+    released = adapter.release(binding)
+
+    with pytest.raises(BindingValidationError, match="workspace provenance mismatch"):
+        adapter.restore(
+            released,
+            RestoreRequest(
+                workflow_ref="temporal://run-381",
+                session_id="session-1",
+                release_id="candidate-v7",
+                idempotency_key="op-1",
+            ),
+        )
