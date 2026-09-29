@@ -50,7 +50,7 @@ def test_release_then_restore_preserves_logical_identity_and_invariants():
 
 
 @pytest.mark.parametrize(
-    ("request", "message"),
+    ("restore_request", "message"),
     [
         (
             RestoreRequest("temporal://other", "session-1", "candidate-v7", "lease://new", "op-1"),
@@ -70,7 +70,7 @@ def test_release_then_restore_preserves_logical_identity_and_invariants():
         ),
     ],
 )
-def test_restore_fails_closed_when_recovery_invariant_is_not_proven(request, message):
+def test_restore_fails_closed_when_recovery_invariant_is_not_proven(restore_request, message):
     adapter = SandboxLifecycleBindingAdapter(InMemorySandboxProvider())
     binding = adapter.bind(
         workflow_ref="temporal://run-381",
@@ -82,4 +82,4 @@ def test_restore_fails_closed_when_recovery_invariant_is_not_proven(request, mes
     released = adapter.release(binding)
 
     with pytest.raises(BindingValidationError, match=message):
-        adapter.restore(released, request)
+        adapter.restore(released, restore_request)
