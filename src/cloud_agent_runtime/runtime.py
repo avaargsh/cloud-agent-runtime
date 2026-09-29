@@ -215,8 +215,11 @@ class AgentRuntime:
     ) -> Run:
         """Replace sandbox execution while preserving canonical Run/Workflow identity."""
         run = self.store.get_run(run_id)
-        if run.status not in {RunStatus.RUNNING, RunStatus.PAUSED}:
-            raise ValueError("sandbox can only be rebound for an active run")
+        if run.status != RunStatus.RUNNING:
+            raise ValueError(
+                "sandbox rebind requires a running run; "
+                "use resume_run for paused recovery"
+            )
         if self.sandbox_provider is None:
             raise ValueError("sandbox provider is required for rebind")
 

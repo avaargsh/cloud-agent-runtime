@@ -31,7 +31,7 @@ Model / Compute
 
 ## Goals
 
-- durable session identity
+- canonical session/run identity across provider lifecycles
 - isolated and resumable sandboxes
 - provider-neutral harness adapters
 - capability binding and policy enforcement
@@ -59,7 +59,7 @@ Create Session
   -> Resume later
 ```
 
-## Implemented durable slice
+## Implemented lifecycle-binding slice
 
 The repository now includes canonical Run/Session contracts, SQLite reference persistence, filesystem artifacts, sandbox lifecycle interfaces, a Temporal client/worker path, deterministic Workflow IDs, approval signal deduplication, pause/resume/complete/fail signals, `run_state` queries, and Temporal integration tests.
 
@@ -85,13 +85,13 @@ pytest -q
 python examples/local_runtime.py
 ```
 
-For the Temporal worker and durable workflow path, see `docs/temporal-worker.md` and `docs/temporal.md`.
+For the Temporal worker and provider-owned durable workflow path, see `docs/temporal-worker.md` and `docs/temporal.md`.
 
 ## Status
 
-Public pre-1.0 reference runtime. The local runtime and Temporal durable lifecycle are implemented; PostgreSQL/S3 adapters, production sandbox isolation, warm pools, tenant quotas, and Kubernetes/GPU scheduling integrations remain roadmap work.
+Public pre-1.0 lifecycle-binding reference. Canonical identity, local sandbox recovery primitives, and a Temporal adapter are implemented; Temporal owns durable orchestration and workflow history; PostgreSQL/S3 adapters, production sandbox isolation, warm pools, tenant quotas, and Kubernetes/GPU scheduling integrations remain roadmap work.
 
-This repository is the **Durable Action Plane** used by `agentic-aiops`; bounded decisions are provided by `agent-decision-lab`.
+This repository is a thin **Run ↔ Workflow ↔ Sandbox lifecycle binding layer**. It does not own durable orchestration, placement policy, or sandbox implementation semantics. Bounded decisions are provided by `agent-decision-lab`.
 
 ## Contributing and license
 
