@@ -9,6 +9,7 @@ def test_snapshot_and_resume() -> None:
     sandbox = provider.allocate()
     provider.bind(sandbox, session_id="session-1")
 
+    original_sandbox_id = sandbox.sandbox_id
     paused = provider.snapshot(sandbox)
 
     assert paused.status == SandboxStatus.PAUSED
@@ -21,3 +22,5 @@ def test_snapshot_and_resume() -> None:
 
     assert resumed.status == SandboxStatus.BOUND
     assert resumed.session_id == "session-1"
+    assert resumed.sandbox_id != original_sandbox_id
+    assert resumed.snapshot_ref == paused.snapshot_ref

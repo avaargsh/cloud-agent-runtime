@@ -153,3 +153,30 @@ def test_denied_approval_fails_run() -> None:
     )
 
     assert rt.store.get_run(run.run_id).status == RunStatus.FAILED
+
+
+def test_sandbox_rebind_preserves_run_and_workflow_identity() -> None:
+    rt = runtime()
+    session = rt.create_session(
+        agent_id="coding-agent",
+        release_id="coding-agent-v1",
+        tenant_id="tenant-a",
+    )
+    run = rt.start_run(session_id=session.session_id)
+    original_run_id = run.run_id
+    original_workflow_ref = run.workflow_ref
+    original_sandbox_ref = run.sandbox_ref
+
+    paused = rt.pause_run(run.run_id)
+    snapshot_ref = paused.sandbox_snapshot_ref
+    assert snapshot_ref is not None
+
+    rebound = rt.rebind_run_sandbox(
+        run.run_id,
+        snapshot_ref=snapshot_ref,
+    )
+
+    assert rebound.run_id == original_run_id
+    assert rebound.workflow_ref == original_workflow_ref
+    assert rebound.sandbox_ref != original_sandbox_ref
+    assert rebound.sandbox_snapshot_ref == snapshot_ref
