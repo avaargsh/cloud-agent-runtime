@@ -1,79 +1,100 @@
-# Cloud Agent Runtime
+# Cloud Agent Runtime — Lifecycle Binding Experiments
 
-Reference architecture and implementation experiments for **one cloud Agent per user/session**, with durable state, isolated execution and pluggable harnesses.
+Thin integration experiments for **durable orchestration ↔ isolated Agent sandbox execution**.
 
-## System model
+> **Project direction (2026-09-29): do not build another Durable Agent Runtime.**
+> Temporal / Restate should own durable execution. Kubernetes Agent Sandbox (or another sandbox provider) should own isolated execution. This repository now focuses only on the small binding/recovery gap between them.
+
+## Boundary
 
 ```text
-Client
-  |
-Application API
-  |  Auth / Tenant / Billing / Quota / RBAC
-  v
-Agent Control Plane
-  |  Profile / Session / Run / Policy / Approval
-  v
-Harness Adapter
-  |  Codex / Claude / OpenCode / custom harness
-  v
-Sandbox
-  |  warm pool / snapshot / resume
-  v
-Capabilities
-  |  MCP / REST / browser / code / data / A2A
-  v
-State + Evidence
-  |  PostgreSQL / S3 / OTel
-  v
-Model / Compute
-     hosted APIs or self-hosted vLLM / SGLang
+Application / Agent semantics
+          |
+          v
+Temporal / Restate
+  durable workflow state
+          |
+          | LifecycleBinding
+          v
+Kubernetes Agent Sandbox
+  logical workspace identity
+          |
+          v
+gVisor / Kata / Kubernetes compute
 ```
 
-## Goals
+The useful contract is intentionally small:
 
-- durable session identity
-- isolated and resumable sandboxes
-- provider-neutral harness adapters
-- capability binding and policy enforcement
-- approval / budget gates for consequential actions
-- evidence, traces and replay
-- multi-tenant quota and SLO controls
+- bind a durable workflow/run identity to a logical sandbox;
+- release compute while preserving recoverable workspace state;
+- restore/rebind after worker, pod, node or sandbox replacement;
+- verify workspace/artifact/version/credential invariants before continuation;
+- preserve idempotency so recovery does not repeat external side effects.
 
 ## Non-goals
 
-- reimplementing every Agent SDK
-- putting business state into Kubernetes CRDs
-- assuming one model provider or one sandbox runtime
-- treating chat history as the entire session state
+This project does **not** aim to implement:
 
-## First vertical slice
+- a new durable workflow engine or event log;
+- an AgentRun controller/state machine;
+- retry, checkpoint, approval, cancellation or scheduling engines;
+- a sandbox controller or warm-pool manager;
+- a generic Agent control plane;
+- PostgreSQL/S3 as a second source of truth for workflow lifecycle;
+- Kueue/Volcano/GPU scheduling.
 
-```text
-Create Session
-  -> Allocate / Resume Sandbox
-  -> Start Run
-  -> Harness calls MCP Tool
-  -> Persist Artifact
-  -> Emit Trace + Evidence
-  -> Complete / Pause
-  -> Resume later
-```
+Those concerns belong to Temporal/Restate, Kubernetes Agent Sandbox, Kubernetes/cloud IAM, object storage and the surrounding application platform.
 
-## Implemented durable slice
+## Existing experiments
 
-The repository now includes canonical Run/Session contracts, SQLite reference persistence, filesystem artifacts, sandbox lifecycle interfaces, a Temporal client/worker path, deterministic Workflow IDs, approval signal deduplication, pause/resume/complete/fail signals, `run_state` queries, and Temporal integration tests.
+The repository contains earlier reference experiments for canonical Run/Session contracts, SQLite persistence, local sandbox lifecycle and a Temporal workflow bridge. They are retained as **experimental evidence**, not as the product boundary.
+
+The Temporal path already demonstrates the key architectural point:
 
 ```text
-Canonical Run ID
-      ↓
+canonical application Run ID
+          ↓
 Temporal Workflow
-      ↓
-pause / approval signal / resume
-      ↓
-provider-neutral runtime state
-      ↓
-complete + evidence refs
+          ↓
+wait / signal / retry / resume
+          ↓
+sandbox activity / binding
+          ↓
+artifact + evidence refs
 ```
+
+Durability stays in Temporal. The next work is to make sandbox binding/recovery explicit without duplicating Temporal semantics.
+
+## Target Golden Path
+
+```text
+Workflow starts
+  -> bind logical sandbox
+  -> exec
+  -> persist artifact/workspace ref
+  -> release compute
+  -> wait for human (zero sandbox compute)
+  -> allocate replacement sandbox
+  -> restore + validate binding invariants
+  -> exec
+  -> complete
+```
+
+Acceptance must prove:
+
+1. workflow identity survives worker restart;
+2. sandbox compute can disappear while the workflow waits;
+3. a replacement sandbox restores the expected workspace/artifacts;
+4. credentials are reissued with the correct scope rather than blindly persisted;
+5. candidate/release version is unchanged or explicitly migrated;
+6. completed side effects are not repeated after recovery.
+
+## Repository role in the open-source stack
+
+- **agentic-aiops** — Agent-specific operational workflow: evidence → decision → policy → approval → action → verification.
+- **agent-decision-lab** — bounded decision benchmark/gateway and confidence-gated escalation.
+- **cloud-agent-runtime** — thin durable-workflow ↔ sandbox binding experiments only.
+- **temp-runner** — disposable cross-repository E2E harness; no product code.
 
 ## Quick start
 
@@ -82,19 +103,12 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 pytest -q
-python examples/local_runtime.py
 ```
 
-For the Temporal worker and durable workflow path, see `docs/temporal-worker.md` and `docs/temporal.md`.
+For the existing Temporal experiment, see `docs/temporal-worker.md` and `docs/temporal.md`.
 
 ## Status
 
-Public pre-1.0 reference runtime. The local runtime and Temporal durable lifecycle are implemented; PostgreSQL/S3 adapters, production sandbox isolation, warm pools, tenant quotas, and Kubernetes/GPU scheduling integrations remain roadmap work.
-
-This repository is the **Durable Action Plane** used by `agentic-aiops`; bounded decisions are provided by `agent-decision-lab`.
-
-## Contributing and license
-
-See `CONTRIBUTING.md`, `SECURITY.md`, and `CODE_OF_CONDUCT.md`.
+Public pre-1.0 architecture/compatibility experiment. The project is intentionally shrinking its ownership surface: **adopt durable execution and sandbox runtimes; implement only the binding semantics that cannot naturally live upstream.**
 
 Licensed under Apache License 2.0. See `LICENSE`.
