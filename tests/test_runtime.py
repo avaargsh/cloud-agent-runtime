@@ -167,7 +167,18 @@ def test_sandbox_rebind_preserves_run_and_workflow_identity() -> None:
     original_workflow_ref = run.workflow_ref
     original_sandbox_ref = run.sandbox_ref
 
-    current = rt._sandboxes[run.run_id]\n    snapshotted = rt.sandbox_provider.snapshot(current)\n    snapshot_ref = snapshotted.snapshot_ref\n    assert snapshot_ref is not None\n\n    # Rebind is a running-run execution replacement. Paused recovery is\n    # intentionally owned by resume_run().\n    current.status = current.status.BOUND\n    rebound = rt.rebind_run_sandbox(\n        run.run_id,\n        snapshot_ref=snapshot_ref,\n    )
+    current = rt._sandboxes[run.run_id]
+    snapshotted = rt.sandbox_provider.snapshot(current)
+    snapshot_ref = snapshotted.snapshot_ref
+    assert snapshot_ref is not None
+
+    # Rebind is a running-run execution replacement. Paused recovery is
+    # intentionally owned by resume_run().
+    current.status = current.status.BOUND
+    rebound = rt.rebind_run_sandbox(
+        run.run_id,
+        snapshot_ref=snapshot_ref,
+    )
 
     assert rebound.run_id == original_run_id
     assert rebound.workflow_ref == original_workflow_ref
