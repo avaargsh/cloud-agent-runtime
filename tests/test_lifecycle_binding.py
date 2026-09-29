@@ -83,3 +83,67 @@ def test_restore_fails_closed_when_recovery_invariant_is_not_proven(restore_requ
 
     with pytest.raises(BindingValidationError, match=message):
         adapter.restore(released, restore_request)
+
+
+class WrongIdentityProvider(InMemorySandboxProvider):
+    def __init__(self, *, provider_name: str | None = None, session_id: str | None = None):
+        super().__init__()
+        self._provider_name = provider_name
+        self._session_id = session_id
+
+    def resume(self, snapshot_ref: str, *, session_id: str):
+        sandbox = super().resume(snapshot_ref, session_id=session_id)
+        if self._provider_name is not None:
+            sandbox = sandbox.__class__(
+                sandbox_id=sandbox.sandbox_id,
+                provider=self._provider_name,
+                status=sandbox.status,
+                snapshot_ref=sandbox.snapshot_ref,
+                session_id=sandbox.session_id,
+            )
+        if self._session_id is not None:
+            sandbox = sandbox.__class__(
+                sandbox_id=sandbox.sandbox_id,
+                provider=sandbox.provider,
+                status=sandbox.status,
+                snapshot_ref=sandbox.snapshot_ref,
+                session_id=self._session_id,
+            )
+        return sandbox
+
+
+@pytest.mark.parametrize(
+    ("provider", "message"),
+    [
+        (
+            WrongIdentityProvider(provider_name="other-provider"),
+            "sandbox provider mismatch after restore",
+        ),
+        (
+            WrongIdentityProvider(session_id="other-session"),
+            "sandbox session mismatch after restore",
+        ),
+    ],
+)
+def test_restore_rejects_replacement_sandbox_with_wrong_identity(provider, message):
+    adapter = SandboxLifecycleBindingAdapter(provider)
+    binding = adapter.bind(
+        workflow_ref="temporal://run-381",
+        session_id="session-1",
+        release_id="candidate-v7",
+        credential_ref="lease://initial",
+        idempotency_key="op-1",
+    )
+    released = adapter.release(binding)
+
+    with pytest.raises(BindingValidationError, match=message):
+        adapter.restore(
+            released,
+            RestoreRequest(
+                workflow_ref="temporal://run-381",
+                session_id="session-1",
+                release_id="candidate-v7",
+                credential_ref="lease://reissued",
+                idempotency_key="op-1",
+            ),
+        )
