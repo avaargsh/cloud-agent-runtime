@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Protocol
 from uuid import uuid4
 
 from .sandbox import Sandbox, SandboxStatus
@@ -31,24 +31,25 @@ class KubernetesSandboxProvider:
         *,
         namespace: str = "agent-sandbox",
         image: str = "busybox:1.36",
-        kubectl: Callable[[list[str]], KubectlResult] | None = None,
+        kubectl: Callable[..., KubectlResult] | None = None,
     ) -> None:
         self.namespace = namespace
         self.image = image
         self._kubectl = kubectl or self._run_kubectl
 
     @staticmethod
-    def _run_kubectl(args: list[str]) -> KubectlResult:
+    def _run_kubectl(args: list[str], *, stdin: str | None = None) -> KubectlResult:
         result = subprocess.run(
             ["kubectl", *args],
             text=True,
+            input=stdin,
             capture_output=True,
             check=False,
         )
         return KubectlResult(result.returncode, result.stdout, result.stderr)
 
-    def _check(self, args: list[str]) -> KubectlResult:
-        result = self._kubectl(args)
+    def _check(self, args: list[str], *, stdin: str | None = None) -> KubectlResult:
+        result = self._kubectl(args, stdin=stdin)
         if result.returncode != 0:
             raise RuntimeError(
                 f"kubectl {' '.join(args)} failed: {result.stderr.strip()}"
