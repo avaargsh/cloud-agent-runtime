@@ -70,9 +70,8 @@ class InMemorySandboxProvider:
         return sandbox
 
     def resume(self, snapshot_ref: str, *, session_id: str) -> Sandbox:
-        sandbox_id = snapshot_ref.removeprefix("snapshot://")
         return Sandbox(
-            sandbox_id=sandbox_id,
+            sandbox_id=str(uuid4()),
             provider=self.name,
             status=SandboxStatus.BOUND,
             snapshot_ref=snapshot_ref,
