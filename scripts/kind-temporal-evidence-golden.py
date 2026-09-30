@@ -3,11 +3,17 @@
 Uses a real Temporal test server and real Kubernetes Pods in a disposable kind
 cluster. Evidence is archived through the same object-store contract used by
 S3ObjectStore; the storage-provider adapter is tested separately.
+
+The policy digest is supplied by the caller. In the standalone runtime CI it is
+a deterministic fixture; the cross-repository AgentOS proof supplies the digest
+compiled by agent-control-plane from CapabilityIntent.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
+import re
 from uuid import uuid4
 
 from temporalio.testing import WorkflowEnvironment
@@ -28,7 +34,24 @@ from cloud_agent_runtime import (
 from cloud_agent_runtime.temporal_workflow import AgentRunWorkflow
 
 
+_POLICY_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def policy_digest_from_environment() -> str:
+    value = os.environ.get("AGENTOS_POLICY_DIGEST", "")
+    if not value:
+        raise RuntimeError(
+            "AGENTOS_POLICY_DIGEST is required for the Golden Slice"
+        )
+    if not _POLICY_DIGEST.fullmatch(value):
+        raise ValueError(
+            "AGENTOS_POLICY_DIGEST must be sha256:<64 lowercase hex>"
+        )
+    return value
+
+
 async def scenario() -> None:
+    policy_digest = policy_digest_from_environment()
     namespace = "agentos-v32-golden"
     provider = KubernetesSandboxProvider(namespace=namespace)
     object_backend = InMemoryObjectStore()
@@ -126,9 +149,7 @@ async def scenario() -> None:
                         "agent.artifact.digest": (
                             "sha256:" + ("a" * 64)
                         ),
-                        "agent.policy.digest": (
-                            "sha256:" + ("b" * 64)
-                        ),
+                        "agent.policy.digest": policy_digest,
                         "sandbox.previous_id": sandbox_a_id,
                         "sandbox.current_id": sandbox_b_id,
                     },
@@ -150,6 +171,16 @@ async def scenario() -> None:
             assert (
                 replayed["event"]["payload"]["trace_id"]
                 == trace_id
+            )
+            assert (
+                replayed["event"]["payload"]["policy_digest"]
+                == policy_digest
+            )
+            assert (
+                replayed["event"]["payload"]["attributes"][
+                    "agent.policy.digest"
+                ]
+                == policy_digest
             )
             assert (
                 replayed["event"]["payload"]["attributes"][
@@ -175,6 +206,7 @@ async def scenario() -> None:
                     "result": {
                         "sandbox_rebound": True,
                         "evidence_replayed": True,
+                        "policy_digest": policy_digest,
                     },
                     "evidence_refs": [evidence_ref],
                 },
@@ -189,6 +221,7 @@ async def scenario() -> None:
             assert result["runtime_run_id"] == canonical_run_id
             assert result["session_id"] == canonical_session_id
             assert result["evidence_refs"] == [evidence_ref]
+            assert result["result"]["policy_digest"] == policy_digest
 
             print("PASS")
             print(f"run_id={canonical_run_id}")
@@ -206,6 +239,7 @@ async def scenario() -> None:
                 f"{archived.manifest.manifest_key}"
             )
             print(f"evidence_digest={archived.manifest.digest}")
+            print(f"policy_digest={policy_digest}")
             print(f"trace_id={trace_id}")
 
 
