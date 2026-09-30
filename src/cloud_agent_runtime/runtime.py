@@ -115,6 +115,34 @@ class AgentRuntime:
             # Cleanup must never mask the primary allocation/persistence error.
             pass
 
+    def _best_effort_cancel_workflow(
+        self,
+        workflow,
+    ) -> bool:
+        if self.workflow_driver is None:
+            return False
+        cancel = getattr(
+            self.workflow_driver,
+            "cancel_run",
+            None,
+        )
+        if cancel is None:
+            return False
+        try:
+            cancel(workflow)
+            return True
+        except Exception:
+            return False
+
+    def _best_effort_save_failed_run(
+        self,
+        run: Run,
+    ) -> None:
+        try:
+            self.store.save_run(run)
+        except Exception:
+            pass
+
     def _replace_sandbox(
         self,
         run: Run,
@@ -262,31 +290,21 @@ class AgentRuntime:
                 sandbox_ref=resolved_sandbox_ref,
             )
 
-        workflow_ref = None
-        try:
-            if self.workflow_driver is not None:
-                workflow_ref = self.workflow_driver.start_run(
-                    runtime_run_id=run_id,
-                    session_id=session_id,
-                )
-        except Exception:
-            if owned_sandbox is not None:
-                self._best_effort_terminate(owned_sandbox)
-            raise
-
         run = Run(
             run_id=run_id,
             session_id=session_id,
             status=RunStatus.RUNNING,
             sandbox_ref=resolved_sandbox_ref,
             sandbox_binding=sandbox_binding,
-            workflow_ref=workflow_ref,
+            workflow_ref=None,
             budget=budget,
         )
 
         if owned_sandbox is not None:
             self._sandboxes[run_id] = owned_sandbox
 
+        # Canonical Run identity must be durable before any external workflow
+        # side effect is created.
         try:
             self.store.save_run(run)
         except Exception:
@@ -294,6 +312,39 @@ class AgentRuntime:
                 self._best_effort_terminate(owned_sandbox)
                 self._sandboxes.pop(run_id, None)
             raise
+
+        if self.workflow_driver is None:
+            return run
+
+        try:
+            workflow_ref = self.workflow_driver.start_run(
+                runtime_run_id=run_id,
+                session_id=session_id,
+            )
+        except Exception:
+            run.status = RunStatus.FAILED
+            self._best_effort_save_failed_run(run)
+            if owned_sandbox is not None:
+                self._best_effort_terminate(owned_sandbox)
+                self._sandboxes.pop(run_id, None)
+            raise
+
+        run.workflow_ref = workflow_ref
+        try:
+            self.store.save_run(run)
+        except Exception:
+            cancelled = self._best_effort_cancel_workflow(
+                workflow_ref
+            )
+            run.status = RunStatus.FAILED
+            if cancelled:
+                run.workflow_ref = None
+            self._best_effort_save_failed_run(run)
+            if owned_sandbox is not None:
+                self._best_effort_terminate(owned_sandbox)
+                self._sandboxes.pop(run_id, None)
+            raise
+
         return run
 
     def request_approval(
