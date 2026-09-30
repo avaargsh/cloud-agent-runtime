@@ -454,12 +454,12 @@ def test_failed_resume_restores_paused_status_and_binding():
 
 
 
-class CancelFailWorkflowDriver(InMemoryWorkflowDriver):
-    def cancel_run(self, workflow):
-        raise RuntimeError("simulated workflow cancel failure")
+class TerminateFailWorkflowDriver(InMemoryWorkflowDriver):
+    def terminate_run(self, workflow, *, reason):
+        raise RuntimeError("simulated workflow termination failure")
 
 
-def test_workflow_binding_persistence_failure_cancels_workflow():
+def test_workflow_binding_persistence_failure_terminates_workflow():
     store = FailOnRunSaveNumberStore(fail_on=2)
     provider = TrackingProvider()
     workflow = InMemoryWorkflowDriver()
@@ -484,17 +484,18 @@ def test_workflow_binding_persistence_failure_cancels_workflow():
     assert len(runs) == 1
     assert runs[0].status.value == "failed"
     assert runs[0].workflow_ref is None
-    assert len(workflow.cancelled) == 1
+    assert len(workflow.terminated) == 1
+    assert workflow.terminated[0][1] == "runtime binding persistence failed"
     assert provider.terminated == [
         provider.allocated[0].sandbox_id
     ]
     assert runtime._sandboxes == {}
 
 
-def test_cancel_failure_retains_workflow_ref_for_recovery():
+def test_termination_failure_retains_workflow_ref_for_recovery():
     store = FailOnRunSaveNumberStore(fail_on=2)
     provider = TrackingProvider()
-    workflow = CancelFailWorkflowDriver()
+    workflow = TerminateFailWorkflowDriver()
     runtime = AgentRuntime(
         store=store,
         sandbox_provider=provider,
