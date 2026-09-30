@@ -42,8 +42,8 @@ def test_otel_span_projects_trace_and_execution_provenance() -> None:
     assert event.payload["trace_id"] == "a" * 32
     assert event.payload["span_id"] == "b" * 16
     assert event.payload["action_id"] == "deploy-001"
-    assert event.payload["policy_digest"].startswith("sha256:")
-    assert event.payload["artifact_digest"].startswith("sha256:")
+    assert event.payload["policy_digest"] == "sha256:" + ("c" * 64)
+    assert event.payload["artifact_digest"] == "sha256:" + ("d" * 64)
 
 
 def test_otel_projection_requires_canonical_run_identity() -> None:
@@ -55,6 +55,39 @@ def test_otel_projection_requires_canonical_run_identity() -> None:
     )
 
     with pytest.raises(OTelEvidenceError, match="agent.run_id"):
+        OTelEvidenceAdapter().to_event(
+            span,
+            provenance=PROVENANCE,
+        )
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [
+        ("agent.policy.digest", "sha256:not-a-digest"),
+        ("agent.policy.digest", "sha256:" + ("A" * 64)),
+        ("agent.artifact.digest", "md5:" + ("a" * 32)),
+        ("agent.artifact.digest", 123),
+    ],
+)
+def test_otel_projection_rejects_noncanonical_digests(
+    attribute,
+    value,
+) -> None:
+    span = OTelSpanSnapshot(
+        trace_id="a" * 32,
+        span_id="b" * 16,
+        name="tool.commit",
+        attributes={
+            "agent.run_id": "run-001",
+            attribute: value,
+        },
+    )
+
+    with pytest.raises(
+        OTelEvidenceError,
+        match=attribute.replace(".", r"\."),
+    ):
         OTelEvidenceAdapter().to_event(
             span,
             provenance=PROVENANCE,
