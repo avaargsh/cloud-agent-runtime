@@ -9,6 +9,7 @@ from .evidence_collector import EvidenceEvent, Provenance
 
 _TRACE_ID = re.compile(r"^[0-9a-f]{32}$")
 _SPAN_ID = re.compile(r"^[0-9a-f]{16}$")
+_SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class OTelEvidenceError(ValueError):
@@ -22,6 +23,14 @@ class OTelSpanSnapshot:
     name: str
     attributes: Mapping[str, Any]
     status: str | None = None
+
+
+def _validate_digest(value: Any, *, attribute: str) -> str:
+    if not isinstance(value, str) or not _SHA256_DIGEST.fullmatch(value):
+        raise OTelEvidenceError(
+            f"{attribute} must be sha256:<64 lowercase hex>"
+        )
+    return value
 
 
 class OTelEvidenceAdapter:
@@ -41,9 +50,13 @@ class OTelEvidenceAdapter:
         trace_id = span.trace_id.lower()
         span_id = span.span_id.lower()
         if not _TRACE_ID.fullmatch(trace_id):
-            raise OTelEvidenceError("trace_id must be 32 lowercase hex characters")
+            raise OTelEvidenceError(
+                "trace_id must be 32 lowercase hex characters"
+            )
         if not _SPAN_ID.fullmatch(span_id):
-            raise OTelEvidenceError("span_id must be 16 lowercase hex characters")
+            raise OTelEvidenceError(
+                "span_id must be 16 lowercase hex characters"
+            )
 
         attributes = dict(span.attributes)
         run_id = attributes.get("agent.run_id")
@@ -55,7 +68,9 @@ class OTelEvidenceAdapter:
             span.name,
         )
         if not isinstance(event_type, str) or not event_type:
-            raise OTelEvidenceError("evidence event type must be a non-empty string")
+            raise OTelEvidenceError(
+                "evidence event type must be a non-empty string"
+            )
 
         action_id = attributes.get("agent.action_id")
         policy_digest = attributes.get("agent.policy.digest")
@@ -71,9 +86,15 @@ class OTelEvidenceAdapter:
         if action_id is not None:
             payload["action_id"] = action_id
         if policy_digest is not None:
-            payload["policy_digest"] = policy_digest
+            payload["policy_digest"] = _validate_digest(
+                policy_digest,
+                attribute="agent.policy.digest",
+            )
         if artifact_digest is not None:
-            payload["artifact_digest"] = artifact_digest
+            payload["artifact_digest"] = _validate_digest(
+                artifact_digest,
+                attribute="agent.artifact.digest",
+            )
 
         return EvidenceEvent(
             event_id=event_id or f"{trace_id}:{span_id}",

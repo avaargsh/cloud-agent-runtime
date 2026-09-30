@@ -17,6 +17,10 @@ jobs:
   golden-slice:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # Standalone runtime fixture. Cross-repo AgentOS CI overrides this with
+      # the SHA-256 digest of the Rego compiled from CapabilityIntent.
+      AGENTOS_POLICY_DIGEST: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -37,6 +41,7 @@ jobs:
           grep '^sandbox_a_id=' /tmp/agentos-v32-golden.txt
           grep '^sandbox_b_id=' /tmp/agentos-v32-golden.txt
           grep '^evidence_manifest=' /tmp/agentos-v32-golden.txt
+          grep '^policy_digest=sha256:' /tmp/agentos-v32-golden.txt
           grep '^trace_id=' /tmp/agentos-v32-golden.txt
       - name: Assert real Pod replacement
         run: |
