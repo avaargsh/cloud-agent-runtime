@@ -10,7 +10,13 @@ from .contracts import (
     CapabilityBinding,
     EvidenceRef,
 )
-from .models import Run, RunStatus, Session, SessionStatus
+from .models import (
+    Run,
+    RunStatus,
+    SandboxBinding,
+    Session,
+    SessionStatus,
+)
 from .workflow import WorkflowRef
 
 
@@ -98,6 +104,40 @@ def session_from_dict(data: dict[str, Any]) -> Session:
     )
 
 
+def _sandbox_binding_to_dict(
+    binding: SandboxBinding | None,
+) -> dict[str, Any] | None:
+    if binding is None:
+        return None
+    return {
+        "provider": binding.provider,
+        "sandbox_id": binding.sandbox_id,
+        "sandbox_ref": binding.sandbox_ref,
+        "revision": binding.revision,
+        "snapshot_ref": binding.snapshot_ref,
+        "previous_refs": list(binding.previous_refs),
+        "pending_cleanup_refs": list(binding.pending_cleanup_refs),
+        "last_rebind_key": binding.last_rebind_key,
+    }
+
+
+def _sandbox_binding_from_dict(
+    value: dict[str, Any] | None,
+) -> SandboxBinding | None:
+    if value is None:
+        return None
+    return SandboxBinding(
+        provider=value["provider"],
+        sandbox_id=value["sandbox_id"],
+        sandbox_ref=value["sandbox_ref"],
+        revision=int(value.get("revision", 1)),
+        snapshot_ref=value.get("snapshot_ref"),
+        previous_refs=list(value.get("previous_refs", [])),
+        pending_cleanup_refs=list(value.get("pending_cleanup_refs", [])),
+        last_rebind_key=value.get("last_rebind_key"),
+    )
+
+
 def run_to_dict(run: Run) -> dict[str, Any]:
     return {
         "run_id": run.run_id,
@@ -105,6 +145,7 @@ def run_to_dict(run: Run) -> dict[str, Any]:
         "status": run.status.value,
         "sandbox_ref": run.sandbox_ref,
         "sandbox_snapshot_ref": run.sandbox_snapshot_ref,
+        "sandbox_binding": _sandbox_binding_to_dict(run.sandbox_binding),
         "workflow_ref": (
             {
                 "provider": run.workflow_ref.provider,
@@ -151,6 +192,9 @@ def run_from_dict(data: dict[str, Any]) -> Run:
         status=RunStatus(data["status"]),
         sandbox_ref=data.get("sandbox_ref"),
         sandbox_snapshot_ref=data.get("sandbox_snapshot_ref"),
+        sandbox_binding=_sandbox_binding_from_dict(
+            data.get("sandbox_binding")
+        ),
         workflow_ref=(
             WorkflowRef(**workflow_data)
             if workflow_data is not None
