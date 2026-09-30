@@ -1,47 +1,66 @@
 # Evidence Object Store Boundary
 
-AgentOS v3.2 uses object storage as the evidence archive boundary.
+AgentOS v3.2 uses S3-compatible object storage as the evidence archive boundary.
 
-Design:
-
-```
-Execution
-   |
-   v
+```text
+OTel exported span
+      |
+      v
+OTelEvidenceAdapter
+      |
+      v
 EvidenceEvent
-   |
-   v
-Object Store (S3 / MinIO)
-   |
-   v
-EvidenceManifest
+      |
+      v
+AppendOnlyEvidenceCollector
+      |
+      v
+EvidenceArchive
+      |
+      +--> evidence/<run>/<content-digest>.json
+      |
+      +--> evidence-manifests/<run>/<manifest-digest>.json
 ```
 
-The runtime does not maintain a second trace database. It stores immutable
-object references and content digests.
+The runtime does not maintain a second trace database. OpenTelemetry remains the
+telemetry substrate; the adapter only projects selected exported span facts into
+the evidence contract.
 
-## Storage model
+## Trust boundary
 
-Hot execution state:
+Harness-local traces are not authoritative evidence. The archive records
+execution-external provenance and persists immutable, content-addressed objects.
 
-- Run identity
-- Session identity
-- Binding state
-- Workflow references
+Every archive write produces two objects:
 
-Evidence archive:
+1. the evidence record bundle;
+2. an immutable manifest containing the evidence object key and digest.
 
-- JSON event bundles
-- artifact references
-- policy decisions
-- tool receipts
-- provenance records
+Replay verifies both layers. Manifest bytes are checked against the digest
+encoded in the manifest key, then evidence bytes are checked against the digest
+inside the manifest.
 
-Production deployments should enable:
+For production S3, MinIO, or Ceph RGW deployments, enable:
 
-- object versioning
-- retention policy / object lock
-- independent digest checkpoint storage
+- bucket versioning;
+- object lock / retention;
+- restricted delete permissions;
+- an independently retained trusted manifest or chain-head checkpoint.
 
-This keeps Evidence separate from Harness logs and allows an external auditor
-to verify execution history.
+A digest chain or content-addressed object name detects mutation, but it does
+not by itself make a storage administrator trustworthy.
+
+## Stored evidence
+
+Evidence objects may contain:
+
+- OTel trace/span identity;
+- Run and Action identity;
+- policy digest;
+- artifact digest;
+- tool receipts;
+- generated/observed/authorized/executed/committed provenance;
+- append-only chain linkage.
+
+Hot Run, Session, Workflow, and Sandbox state stays in the runtime state store.
+Evidence payloads stay in the object archive.

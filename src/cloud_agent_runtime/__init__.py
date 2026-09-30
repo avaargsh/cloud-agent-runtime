@@ -12,6 +12,7 @@ from .contracts import (
     CapabilityBinding,
     EvidenceRef,
 )
+from .evidence_archive import ArchivedEvidence, EvidenceArchive
 from .evidence_collector import (
     AppendOnlyEvidenceCollector,
     EvidenceEvent,
@@ -19,8 +20,19 @@ from .evidence_collector import (
     EvidenceRecord,
     Provenance,
 )
+from .evidence_object_store import (
+    EvidenceManifest,
+    EvidenceObjectIntegrityError,
+    EvidenceObjectStore,
+    InMemoryObjectStore,
+)
 from .kubernetes_sandbox import KubernetesSandboxProvider
 from .models import Run, RunStatus, Session, SessionStatus
+from .otel_evidence import (
+    OTelEvidenceAdapter,
+    OTelEvidenceError,
+    OTelSpanSnapshot,
+)
 from .runtime import AgentRuntime
 from .sandbox import (
     InMemorySandboxProvider,
@@ -41,6 +53,7 @@ from .workflow import InMemoryWorkflowDriver, WorkflowRef
 
 __all__ = [
     "AgentRuntime",
+    "ArchivedEvidence",
     "AppendOnlyEvidenceCollector",
     "Approval",
     "ApprovalStatus",
@@ -49,16 +62,24 @@ __all__ = [
     "AsyncWorkflowDriver",
     "Budget",
     "CapabilityBinding",
+    "EvidenceArchive",
     "EvidenceEvent",
     "EvidenceIntegrityError",
+    "EvidenceManifest",
+    "EvidenceObjectIntegrityError",
+    "EvidenceObjectStore",
     "EvidenceRecord",
     "EvidenceRef",
     "InMemoryAsyncWorkflowDriver",
+    "InMemoryObjectStore",
     "InMemorySandboxProvider",
     "InMemoryStore",
     "InMemoryWorkflowDriver",
     "KubernetesSandboxProvider",
     "LocalArtifactStore",
+    "OTelEvidenceAdapter",
+    "OTelEvidenceError",
+    "OTelSpanSnapshot",
     "Provenance",
     "RetryableToolError",
     "Run",
