@@ -599,3 +599,35 @@ def test_rebind_cleans_allocated_sandbox_when_bind_fails():
     assert persisted.sandbox_ref == original_ref
     assert persisted.sandbox_binding == original_binding
     assert runtime._sandboxes[run.run_id] is original_cache
+
+
+
+def test_rebind_replay_retries_pending_cleanup_without_new_replacement():
+    provider = FailOnceTerminateProvider()
+    runtime = AgentRuntime(
+        sandbox_provider=provider,
+        workflow_driver=InMemoryWorkflowDriver(),
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+
+    first = runtime.rebind_run_sandbox(
+        run.run_id,
+        rebind_key="cleanup-retry-key",
+    )
+    first_ref = first.sandbox_ref
+    first_revision = first.sandbox_binding.revision
+    assert first.sandbox_binding.pending_cleanup_refs
+
+    replay = runtime.rebind_run_sandbox(
+        run.run_id,
+        rebind_key="cleanup-retry-key",
+    )
+
+    assert replay.sandbox_ref == first_ref
+    assert replay.sandbox_binding.revision == first_revision
+    assert replay.sandbox_binding.pending_cleanup_refs == []
