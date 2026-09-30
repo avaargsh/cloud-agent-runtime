@@ -25,6 +25,26 @@ class AsyncAgentRuntime(AgentRuntime):
         )
         self.async_workflow_driver = workflow_driver
 
+    async def _best_effort_terminate_async_workflow(
+        self,
+        workflow,
+    ) -> bool:
+        terminate = getattr(
+            self.async_workflow_driver,
+            "terminate_run",
+            None,
+        )
+        if terminate is None:
+            return False
+        try:
+            await terminate(
+                workflow,
+                reason="runtime binding persistence failed",
+            )
+            return True
+        except Exception:
+            return False
+
     async def start_run(
         self,
         *,
@@ -32,6 +52,8 @@ class AsyncAgentRuntime(AgentRuntime):
         sandbox_ref: str | None = None,
         budget: Budget | None = None,
     ) -> Run:
+        # super().start_run persists the canonical Run and Sandbox binding
+        # before this async workflow provider creates an external side effect.
         run = super().start_run(
             session_id=session_id,
             sandbox_ref=sandbox_ref,
@@ -39,26 +61,46 @@ class AsyncAgentRuntime(AgentRuntime):
         )
 
         try:
-            run.workflow_ref = (
+            workflow_ref = (
                 await self.async_workflow_driver.start_run(
                     runtime_run_id=run.run_id,
                     session_id=session_id,
                 )
             )
-            self.store.save_run(run)
-            return run
         except Exception:
             run.status = RunStatus.FAILED
-            self.store.save_run(run)
-
-            if (
-                self.sandbox_provider is not None
-                and run.run_id in self._sandboxes
-            ):
-                self.sandbox_provider.terminate(
-                    self._sandboxes[run.run_id]
-                )
+            self._best_effort_save_failed_run(run)
+            current = self._sandboxes.pop(
+                run.run_id,
+                None,
+            )
+            if current is not None:
+                self._best_effort_terminate(current)
             raise
+
+        run.workflow_ref = workflow_ref
+        try:
+            self.store.save_run(run)
+        except Exception:
+            terminated = (
+                await self._best_effort_terminate_async_workflow(
+                    workflow_ref
+                )
+            )
+            run.status = RunStatus.FAILED
+            if terminated:
+                run.workflow_ref = None
+            self._best_effort_save_failed_run(run)
+
+            current = self._sandboxes.pop(
+                run.run_id,
+                None,
+            )
+            if current is not None:
+                self._best_effort_terminate(current)
+            raise
+
+        return run
 
     async def resolve_approval(
         self,

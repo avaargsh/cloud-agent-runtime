@@ -8,9 +8,13 @@ class FakeHandle:
 
     def __init__(self):
         self.signals = []
+        self.terminations = []
 
     async def signal(self, name, payload):
         self.signals.append((name, payload))
+
+    async def terminate(self, *, reason):
+        self.terminations.append(reason)
 
 
 class FakeClient:
@@ -74,6 +78,14 @@ def test_temporal_driver_uses_canonical_runtime_run_id() -> None:
                 "approval_resolved",
                 {"approved": True},
             )
+        ]
+
+        await driver.terminate_run(
+            ref,
+            reason="binding persistence failed",
+        )
+        assert client.handle.terminations == [
+            "binding persistence failed"
         ]
 
     asyncio.run(scenario())

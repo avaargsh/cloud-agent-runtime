@@ -9,6 +9,7 @@ from cloud_agent_runtime import (
     InMemorySandboxProvider,
     RunStatus,
 )
+from cloud_agent_runtime.store import InMemoryStore
 
 
 def test_async_runtime_starts_workflow_and_signals_approval() -> None:
@@ -71,6 +72,9 @@ def test_async_workflow_start_failure_marks_run_failed() -> None:
         async def signal(self, *args, **kwargs):
             return None
 
+        async def terminate_run(self, workflow, *, reason):
+            return None
+
     async def scenario():
         runtime = AsyncAgentRuntime(
             sandbox_provider=InMemorySandboxProvider(),
@@ -90,5 +94,91 @@ def test_async_workflow_start_failure_marks_run_failed() -> None:
         runs = list(runtime.store.runs.values())
         assert len(runs) == 1
         assert runs[0].status == RunStatus.FAILED
+        assert runtime._sandboxes == {}
+
+    asyncio.run(scenario())
+
+
+
+class FailOnRunSaveNumberStore(InMemoryStore):
+    def __init__(self, fail_on: int):
+        super().__init__()
+        self.fail_on = fail_on
+        self.save_count = 0
+
+    def save_run(self, run):
+        self.save_count += 1
+        if self.save_count == self.fail_on:
+            raise RuntimeError("simulated run persistence failure")
+        return super().save_run(run)
+
+
+class TerminateFailAsyncDriver(InMemoryAsyncWorkflowDriver):
+    async def terminate_run(self, workflow, *, reason):
+        raise RuntimeError("simulated async termination failure")
+
+
+def test_async_binding_persistence_failure_terminates_workflow():
+    async def scenario():
+        store = FailOnRunSaveNumberStore(fail_on=2)
+        driver = InMemoryAsyncWorkflowDriver()
+        runtime = AsyncAgentRuntime(
+            store=store,
+            sandbox_provider=InMemorySandboxProvider(),
+            workflow_driver=driver,
+        )
+        session = runtime.create_session(
+            agent_id="sre-agent",
+            release_id="release-v1",
+            tenant_id="tenant-a",
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="simulated run persistence failure",
+        ):
+            await runtime.start_run(
+                session_id=session.session_id,
+            )
+
+        runs = list(store.runs.values())
+        assert len(runs) == 1
+        assert runs[0].status == RunStatus.FAILED
+        assert runs[0].workflow_ref is None
+        assert len(driver.terminated) == 1
+        assert driver.terminated[0][1] == "runtime binding persistence failed"
+        assert runtime._sandboxes == {}
+
+    asyncio.run(scenario())
+
+
+def test_async_termination_failure_retains_workflow_ref():
+    async def scenario():
+        store = FailOnRunSaveNumberStore(fail_on=2)
+        driver = TerminateFailAsyncDriver()
+        runtime = AsyncAgentRuntime(
+            store=store,
+            sandbox_provider=InMemorySandboxProvider(),
+            workflow_driver=driver,
+        )
+        session = runtime.create_session(
+            agent_id="sre-agent",
+            release_id="release-v1",
+            tenant_id="tenant-a",
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="simulated run persistence failure",
+        ):
+            await runtime.start_run(
+                session_id=session.session_id,
+            )
+
+        runs = list(store.runs.values())
+        assert len(runs) == 1
+        assert runs[0].status == RunStatus.FAILED
+        assert runs[0].workflow_ref is not None
+        assert runtime._sandboxes == {}
 
     asyncio.run(scenario())
