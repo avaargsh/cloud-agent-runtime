@@ -34,6 +34,17 @@ class TemporalRunBridge:
     async def start_or_attach(self, *, runtime_run_id: str, session_id: str) -> WorkflowRef:
         return await self.driver.start_run(runtime_run_id=runtime_run_id, session_id=session_id)
 
+    def reference(self, *, runtime_run_id: str) -> WorkflowRef:
+        """Return the canonical workflow identity without creating or attaching.
+
+        Read/query and idempotent post-completion retries use this path so a
+        terminal workflow remains observable without weakening start semantics.
+        """
+        return WorkflowRef(
+            provider=self.driver.name,
+            workflow_id=self.driver.workflow_id_for(runtime_run_id),
+        )
+
     async def signal_approval(self, workflow: WorkflowRef, *, approval_id: str, approved: bool, evidence_refs: Sequence[str] = (), reason: str | None = None) -> None:
         payload: dict[str, Any] = {"approval_id": approval_id, "approved": approved, "evidence_refs": list(evidence_refs)}
         if reason is not None:
