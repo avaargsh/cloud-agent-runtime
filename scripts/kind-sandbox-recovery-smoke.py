@@ -31,7 +31,7 @@ assert checkpoint
 
 # Inject actual Pod loss.
 provider.terminate(active)
-active.status = active.status.BOUND
+assert active.status.value == "terminated"
 
 rebound = runtime.rebind_run_sandbox(run_id, snapshot_ref=checkpoint)
 sandbox_b_id = runtime._sandboxes[run_id].sandbox_id

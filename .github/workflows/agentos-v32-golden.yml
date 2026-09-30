@@ -1,0 +1,65 @@
+name: agentos-v32-golden
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "src/cloud_agent_runtime/**"
+      - "scripts/kind-temporal-evidence-golden.py"
+      - ".github/workflows/agentos-v32-golden.yml"
+  pull_request:
+    paths:
+      - "src/cloud_agent_runtime/**"
+      - "scripts/kind-temporal-evidence-golden.py"
+      - ".github/workflows/agentos-v32-golden.yml"
+
+jobs:
+  golden-slice:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: agentos-v32-golden
+      - name: Install runtime with Temporal support
+        run: pip install -e ".[dev]"
+      - name: Run Temporal + Kubernetes + Evidence Golden Slice
+        run: |
+          python scripts/kind-temporal-evidence-golden.py | tee /tmp/agentos-v32-golden.txt
+          grep -qx 'PASS' /tmp/agentos-v32-golden.txt
+          grep '^run_id=' /tmp/agentos-v32-golden.txt
+          grep '^session_id=' /tmp/agentos-v32-golden.txt
+          grep '^workflow_id=' /tmp/agentos-v32-golden.txt
+          grep '^sandbox_a_id=' /tmp/agentos-v32-golden.txt
+          grep '^sandbox_b_id=' /tmp/agentos-v32-golden.txt
+          grep '^evidence_manifest=' /tmp/agentos-v32-golden.txt
+          grep '^trace_id=' /tmp/agentos-v32-golden.txt
+      - name: Assert real Pod replacement
+        run: |
+          sandbox_a_id="$(sed -n 's/^sandbox_a_id=//p' /tmp/agentos-v32-golden.txt)"
+          sandbox_b_id="$(sed -n 's/^sandbox_b_id=//p' /tmp/agentos-v32-golden.txt)"
+          test -n "$sandbox_a_id"
+          test -n "$sandbox_b_id"
+          test "$sandbox_a_id" != "$sandbox_b_id"
+
+          kubectl -n agentos-v32-golden wait             --for=delete "pod/$sandbox_a_id" --timeout=60s
+          kubectl -n agentos-v32-golden wait             --for=condition=Ready "pod/$sandbox_b_id" --timeout=60s
+
+          if kubectl -n agentos-v32-golden get             "pod/$sandbox_a_id" >/dev/null 2>&1; then
+            echo "old sandbox Pod still exists" >&2
+            exit 1
+          fi
+
+          test "$(
+            kubectl -n agentos-v32-golden get pod               "$sandbox_b_id" -o jsonpath='{.metadata.name}'
+          )" = "$sandbox_b_id"
+      - name: Upload Golden Slice proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentos-v32-golden-proof
+          path: /tmp/agentos-v32-golden.txt
