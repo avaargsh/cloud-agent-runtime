@@ -6,6 +6,41 @@ from typing import Any
 from .workflow import WorkflowRef
 
 
+_TERMINAL_WORKFLOW_STATUSES = {
+    "COMPLETED",
+    "FAILED",
+    "CANCELED",
+    "CANCELLED",
+    "TERMINATED",
+    "CONTINUED_AS_NEW",
+    "CONTINUEDASNEW",
+    "TIMED_OUT",
+    "TIMEDOUT",
+}
+
+
+class TemporalWorkflowConflict(RuntimeError):
+    """Canonical Runtime Run points at a terminal Temporal execution."""
+
+
+def _workflow_status_name(status: Any) -> str:
+    if status is None:
+        return ""
+    name = getattr(status, "name", None)
+    if isinstance(name, str) and name:
+        return name.upper()
+    value = str(status).upper()
+    if "." in value:
+        value = value.rsplit(".", 1)[-1]
+    if value.startswith("WORKFLOW_EXECUTION_STATUS_"):
+        value = value.removeprefix("WORKFLOW_EXECUTION_STATUS_")
+    return value
+
+
+def _workflow_is_terminal(status: Any) -> bool:
+    return _workflow_status_name(status) in _TERMINAL_WORKFLOW_STATUSES
+
+
 @dataclass
 class TemporalWorkflowDriver:
     """Async adapter over a Temporal Python SDK Client."""
@@ -90,12 +125,32 @@ class TemporalWorkflowDriver:
             )
         except WorkflowAlreadyStartedError:
             # Canonical runtime_run_id maps to exactly one Temporal workflow
-            # execution, including after that execution has reached a terminal
-            # state. REJECT_DUPLICATE prevents a later status/attach call from
-            # silently creating a fresh workflow with empty state.
+            # identity. Reuse is only valid while the existing execution is
+            # nonterminal; attaching a terminal execution would make a new
+            # Runtime Run look active while continuation has already ended.
             handle = self.client.get_workflow_handle(
                 workflow_id
             )
+            describe = getattr(handle, "describe", None)
+            if describe is None:
+                raise TemporalWorkflowConflict(
+                    "cannot verify existing Temporal workflow status: "
+                    f"{workflow_id}"
+                )
+            description = await describe()
+            status = getattr(description, "status", None)
+            if isinstance(description, dict):
+                status = description.get("status")
+            if not status:
+                raise TemporalWorkflowConflict(
+                    "existing Temporal workflow status is unavailable: "
+                    f"{workflow_id}"
+                )
+            if _workflow_is_terminal(status):
+                raise TemporalWorkflowConflict(
+                    "existing Temporal workflow is terminal: "
+                    f"{workflow_id} status={_workflow_status_name(status)}"
+                )
 
         return WorkflowRef(
             provider=self.name,
