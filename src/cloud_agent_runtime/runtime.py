@@ -555,11 +555,15 @@ class AgentRuntime:
                 session_id=run.session_id,
             )
         else:
-            sandbox = self.sandbox_provider.allocate()
-            sandbox = self.sandbox_provider.bind(
-                sandbox,
-                session_id=run.session_id,
-            )
+            allocated = self.sandbox_provider.allocate()
+            try:
+                sandbox = self.sandbox_provider.bind(
+                    allocated,
+                    session_id=run.session_id,
+                )
+            except Exception:
+                self._best_effort_terminate(allocated)
+                raise
 
         return self._replace_sandbox(
             run,
