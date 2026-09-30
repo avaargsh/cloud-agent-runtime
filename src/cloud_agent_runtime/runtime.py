@@ -11,7 +11,7 @@ from .contracts import (
     EvidenceRef,
 )
 from .models import Run, RunStatus, Session, SessionStatus
-from .sandbox import Sandbox, SandboxProvider
+from .sandbox import Sandbox, SandboxProvider, SandboxStatus
 from .store import InMemoryStore, RuntimeStore
 from .workflow import WorkflowDriver
 
@@ -245,7 +245,11 @@ class AgentRuntime:
         )
         self.store.save_run(run)
 
-        if previous is not None and previous is not sandbox:
+        if (
+            previous is not None
+            and previous is not sandbox
+            and previous.status != SandboxStatus.TERMINATED
+        ):
             self.sandbox_provider.terminate(previous)
 
         return run

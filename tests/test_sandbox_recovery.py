@@ -32,7 +32,7 @@ def test_run_survives_sandbox_replacement_with_durable_refs():
 
     # Simulate loss of Sandbox A after a durable snapshot was produced.
     runtime.sandbox_provider.terminate(active)
-    active.status = active.status.BOUND
+    assert active.status.value == "terminated"
 
     rebound = runtime.rebind_run_sandbox(
         run.run_id,
@@ -42,6 +42,7 @@ def test_run_survives_sandbox_replacement_with_durable_refs():
     assert rebound.run_id == canonical_run_id
     assert rebound.workflow_ref == workflow_ref
     assert rebound.sandbox_ref != sandbox_a
+    assert active.status.value == "terminated"
     assert rebound.artifact_refs == [
         "artifact://golden/run-001/diagnostic.json"
     ]
