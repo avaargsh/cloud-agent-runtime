@@ -25,12 +25,19 @@ class AsyncWorkflowDriver(Protocol):
     ) -> None:
         ...
 
+    async def cancel_run(
+        self,
+        workflow: WorkflowRef,
+    ) -> None:
+        ...
+
 
 class InMemoryAsyncWorkflowDriver:
     name = "in-memory-async"
 
     def __init__(self) -> None:
         self.signals: list[tuple[str, str, dict]] = []
+        self.cancelled: list[str] = []
 
     async def start_run(
         self,
@@ -58,3 +65,10 @@ class InMemoryAsyncWorkflowDriver:
                 dict(payload),
             )
         )
+
+
+    async def cancel_run(
+        self,
+        workflow: WorkflowRef,
+    ) -> None:
+        self.cancelled.append(workflow.workflow_id)
