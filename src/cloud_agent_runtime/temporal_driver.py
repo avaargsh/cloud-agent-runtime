@@ -126,9 +126,11 @@ class TemporalWorkflowDriver:
 
         await handle.signal(name, payload)
 
-    async def cancel_run(
+    async def terminate_run(
         self,
         workflow: WorkflowRef,
+        *,
+        reason: str,
     ) -> None:
         if workflow.run_id is not None:
             handle = self.client.get_workflow_handle(
@@ -139,7 +141,7 @@ class TemporalWorkflowDriver:
             handle = self.client.get_workflow_handle(
                 workflow.workflow_id,
             )
-        await handle.cancel()
+        await handle.terminate(reason=reason)
 
     async def query(
         self,
