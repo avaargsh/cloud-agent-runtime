@@ -148,6 +148,10 @@ class AgentRuntime:
             last_rebind_key=rebind_key,
         )
 
+        original_sandbox_ref = run.sandbox_ref
+        original_snapshot_ref = run.sandbox_snapshot_ref
+        original_binding = run.sandbox_binding
+
         run.sandbox_ref = sandbox_ref
         run.sandbox_snapshot_ref = sandbox.snapshot_ref
         run.sandbox_binding = binding
@@ -156,8 +160,11 @@ class AgentRuntime:
             self.store.save_run(run)
         except Exception:
             # A replacement that was allocated but never durably bound to the
-            # canonical Run is an orphan. Cleanup must not mask the original
-            # persistence failure.
+            # canonical Run is an orphan. Roll back the in-memory Run as well,
+            # because some RuntimeStore implementations return object refs.
+            run.sandbox_ref = original_sandbox_ref
+            run.sandbox_snapshot_ref = original_snapshot_ref
+            run.sandbox_binding = original_binding
             self._best_effort_terminate(sandbox)
             self._sandboxes.pop(run.run_id, None)
             raise
@@ -234,24 +241,10 @@ class AgentRuntime:
             raise ValueError("runs can only start on an active session")
 
         run_id = str(uuid4())
-        workflow_ref = None
-
-        if self.workflow_driver is not None:
-            workflow_ref = self.workflow_driver.start_run(
-                runtime_run_id=run_id,
-                session_id=session_id,
-            )
-
-        run = Run(
-            run_id=run_id,
-            session_id=session_id,
-            status=RunStatus.RUNNING,
-            sandbox_ref=sandbox_ref,
-            workflow_ref=workflow_ref,
-            budget=budget,
-        )
-
         owned_sandbox: Sandbox | None = None
+        resolved_sandbox_ref = sandbox_ref
+        sandbox_binding: SandboxBinding | None = None
+
         if sandbox_ref is None and self.sandbox_provider is not None:
             allocated = self.sandbox_provider.allocate()
             try:
@@ -263,13 +256,37 @@ class AgentRuntime:
                 self._best_effort_terminate(allocated)
                 raise
 
-            self._sandboxes[run_id] = owned_sandbox
-            run.sandbox_ref = self._sandbox_ref(owned_sandbox)
-            run.sandbox_binding = SandboxBinding(
+            resolved_sandbox_ref = self._sandbox_ref(owned_sandbox)
+            sandbox_binding = SandboxBinding(
                 provider=owned_sandbox.provider,
                 sandbox_id=owned_sandbox.sandbox_id,
-                sandbox_ref=run.sandbox_ref,
+                sandbox_ref=resolved_sandbox_ref,
             )
+
+        workflow_ref = None
+        try:
+            if self.workflow_driver is not None:
+                workflow_ref = self.workflow_driver.start_run(
+                    runtime_run_id=run_id,
+                    session_id=session_id,
+                )
+        except Exception:
+            if owned_sandbox is not None:
+                self._best_effort_terminate(owned_sandbox)
+            raise
+
+        run = Run(
+            run_id=run_id,
+            session_id=session_id,
+            status=RunStatus.RUNNING,
+            sandbox_ref=resolved_sandbox_ref,
+            sandbox_binding=sandbox_binding,
+            workflow_ref=workflow_ref,
+            budget=budget,
+        )
+
+        if owned_sandbox is not None:
+            self._sandboxes[run_id] = owned_sandbox
 
         try:
             self.store.save_run(run)
@@ -389,13 +406,18 @@ class AgentRuntime:
                 run.sandbox_snapshot_ref,
                 session_id=run.session_id,
             )
+            previous_status = run.status
             run.status = RunStatus.RUNNING
-            return self._replace_sandbox(
-                run,
-                sandbox,
-                previous=previous,
-                rebind_key=f"resume:{run.sandbox_snapshot_ref}",
-            )
+            try:
+                return self._replace_sandbox(
+                    run,
+                    sandbox,
+                    previous=previous,
+                    rebind_key=f"resume:{run.sandbox_snapshot_ref}",
+                )
+            except Exception:
+                run.status = previous_status
+                raise
 
         run.status = RunStatus.RUNNING
         self.store.save_run(run)
