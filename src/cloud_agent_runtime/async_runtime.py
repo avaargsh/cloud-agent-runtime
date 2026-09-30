@@ -25,19 +25,22 @@ class AsyncAgentRuntime(AgentRuntime):
         )
         self.async_workflow_driver = workflow_driver
 
-    async def _best_effort_cancel_async_workflow(
+    async def _best_effort_terminate_async_workflow(
         self,
         workflow,
     ) -> bool:
-        cancel = getattr(
+        terminate = getattr(
             self.async_workflow_driver,
-            "cancel_run",
+            "terminate_run",
             None,
         )
-        if cancel is None:
+        if terminate is None:
             return False
         try:
-            await cancel(workflow)
+            await terminate(
+                workflow,
+                reason="runtime binding persistence failed",
+            )
             return True
         except Exception:
             return False
@@ -79,13 +82,13 @@ class AsyncAgentRuntime(AgentRuntime):
         try:
             self.store.save_run(run)
         except Exception:
-            cancelled = (
-                await self._best_effort_cancel_async_workflow(
+            terminated = (
+                await self._best_effort_terminate_async_workflow(
                     workflow_ref
                 )
             )
             run.status = RunStatus.FAILED
-            if cancelled:
+            if terminated:
                 run.workflow_ref = None
             self._best_effort_save_failed_run(run)
 
