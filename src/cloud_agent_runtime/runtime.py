@@ -447,9 +447,22 @@ class AgentRuntime:
         if run.status != RunStatus.RUNNING:
             raise ValueError("only a running run can be paused")
 
+        cached_before: Sandbox | None = None
+        cached_status: SandboxStatus | None = None
+        cached_snapshot_ref: str | None = None
+        original_snapshot_ref = run.sandbox_snapshot_ref
+        original_binding_snapshot_ref = (
+            run.sandbox_binding.snapshot_ref
+            if run.sandbox_binding is not None
+            else None
+        )
+
         if self.sandbox_provider is not None:
             current = self._current_sandbox(run)
             if current is not None:
+                cached_before = current
+                cached_status = current.status
+                cached_snapshot_ref = current.snapshot_ref
                 sandbox = self.sandbox_provider.snapshot(current)
                 self._sandboxes[run_id] = sandbox
                 run.sandbox_snapshot_ref = sandbox.snapshot_ref
@@ -459,7 +472,20 @@ class AgentRuntime:
                     run.sandbox_binding = binding
 
         run.status = RunStatus.PAUSED
-        self.store.save_run(run)
+        try:
+            self.store.save_run(run)
+        except Exception:
+            run.status = RunStatus.RUNNING
+            run.sandbox_snapshot_ref = original_snapshot_ref
+            if run.sandbox_binding is not None:
+                run.sandbox_binding.snapshot_ref = (
+                    original_binding_snapshot_ref
+                )
+            if cached_before is not None:
+                cached_before.status = cached_status or SandboxStatus.BOUND
+                cached_before.snapshot_ref = cached_snapshot_ref
+                self._sandboxes[run_id] = cached_before
+            raise
         return run
 
     def resume_run(self, run_id: str) -> Run:

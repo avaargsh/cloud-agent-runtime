@@ -518,3 +518,46 @@ def test_termination_failure_retains_workflow_ref_for_recovery():
     assert runs[0].status.value == "failed"
     assert runs[0].workflow_ref is not None
     assert runtime._sandboxes == {}
+
+
+
+def test_failed_pause_persistence_restores_running_cache_and_is_retryable():
+    store = ToggleFailRunStore()
+    provider = TrackingProvider()
+    runtime = AgentRuntime(
+        store=store,
+        sandbox_provider=provider,
+        workflow_driver=InMemoryWorkflowDriver(),
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+    cached = runtime._sandboxes[run.run_id]
+    original_ref = run.sandbox_ref
+
+    store.fail_runs = True
+    with pytest.raises(
+        RuntimeError,
+        match="simulated run persistence failure",
+    ):
+        runtime.pause_run(run.run_id)
+
+    persisted = store.get_run(run.run_id)
+    assert persisted.status.value == "running"
+    assert persisted.sandbox_ref == original_ref
+    assert persisted.sandbox_snapshot_ref is None
+    assert persisted.sandbox_binding is not None
+    assert persisted.sandbox_binding.snapshot_ref is None
+    assert runtime._sandboxes[run.run_id] is cached
+    assert cached.status.value == "bound"
+    assert cached.snapshot_ref is None
+
+    store.fail_runs = False
+    paused = runtime.pause_run(run.run_id)
+
+    assert paused.status.value == "paused"
+    assert paused.sandbox_snapshot_ref is not None
+    assert runtime._sandboxes[run.run_id].status.value == "paused"
