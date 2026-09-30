@@ -29,8 +29,10 @@ class FakeHandle:
 class FakeClient:
     def __init__(self):
         self.handle = FakeHandle()
+        self.start_calls = 0
 
     async def start_workflow(self, workflow_type, *, args, id, task_queue, id_reuse_policy):
+        self.start_calls += 1
         return self.handle
 
     def get_workflow_handle(self, workflow_id, **kwargs):
@@ -135,3 +137,32 @@ def test_bridge_complete_accepts_close_race_when_terminal_is_durable() -> None:
         assert client.handle.state["terminal"] is True
 
     asyncio.run(scenario())
+
+def test_bridge_reference_reads_terminal_run_without_start_or_attach() -> None:
+    async def scenario():
+        client = FakeClient()
+        client.handle.state.update(
+            {
+                "phase": "succeeded",
+                "paused": False,
+                "terminal": True,
+            }
+        )
+        bridge = TemporalRunBridge(
+            TemporalWorkflowDriver(
+                client=client,
+                task_queue="agent-runs",
+            )
+        )
+
+        ref = bridge.reference(runtime_run_id="run-1")
+        status = await bridge.get_run_status(ref)
+
+        assert ref.workflow_id == "agent-run-run-1"
+        assert client.start_calls == 0
+        assert status.runtime_run_id == "run-1"
+        assert status.phase == "succeeded"
+        assert status.terminal is True
+
+    asyncio.run(scenario())
+
