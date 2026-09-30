@@ -166,7 +166,6 @@ class AgentRuntime:
             run.sandbox_snapshot_ref = original_snapshot_ref
             run.sandbox_binding = original_binding
             self._best_effort_terminate(sandbox)
-            self._sandboxes.pop(run.run_id, None)
             raise
 
         self._sandboxes[run.run_id] = sandbox
