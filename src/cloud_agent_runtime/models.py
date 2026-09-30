@@ -42,12 +42,27 @@ class Session:
 
 
 @dataclass
+class SandboxBinding:
+    """Durable binding between a canonical Run and disposable sandbox execution."""
+
+    provider: str
+    sandbox_id: str
+    sandbox_ref: str
+    revision: int = 1
+    snapshot_ref: str | None = None
+    previous_refs: list[str] = field(default_factory=list)
+    pending_cleanup_refs: list[str] = field(default_factory=list)
+    last_rebind_key: str | None = None
+
+
+@dataclass
 class Run:
     run_id: str
     session_id: str
     status: RunStatus = RunStatus.CREATED
     sandbox_ref: str | None = None
     sandbox_snapshot_ref: str | None = None
+    sandbox_binding: SandboxBinding | None = None
     workflow_ref: WorkflowRef | None = None
     artifact_refs: list[ArtifactRef | str] = field(default_factory=list)
     evidence_refs: list[EvidenceRef | str] = field(default_factory=list)

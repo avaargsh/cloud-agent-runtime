@@ -27,7 +27,7 @@ from .evidence_object_store import (
     InMemoryObjectStore,
 )
 from .kubernetes_sandbox import KubernetesSandboxProvider
-from .models import Run, RunStatus, Session, SessionStatus
+from .models import Run, RunStatus, SandboxBinding, Session, SessionStatus
 from .otel_evidence import (
     OTelEvidenceAdapter,
     OTelEvidenceError,
@@ -85,6 +85,7 @@ __all__ = [
     "RetryableToolError",
     "Run",
     "RunStatus",
+    "SandboxBinding",
     "S3ObjectStore",
     "SQLiteStore",
     "Sandbox",

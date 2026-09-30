@@ -10,7 +10,13 @@ from .contracts import (
     CapabilityBinding,
     EvidenceRef,
 )
-from .models import Run, RunStatus, Session, SessionStatus
+from .models import (
+    Run,
+    RunStatus,
+    SandboxBinding,
+    Session,
+    SessionStatus,
+)
 from .sandbox import Sandbox, SandboxProvider, SandboxStatus
 from .store import InMemoryStore, RuntimeStore
 from .workflow import WorkflowDriver
@@ -30,6 +36,157 @@ class AgentRuntime:
         self.sandbox_provider = sandbox_provider
         self.workflow_driver = workflow_driver
         self._sandboxes: dict[str, Sandbox] = {}
+
+    @staticmethod
+    def _sandbox_ref(sandbox: Sandbox) -> str:
+        return f"sandbox://{sandbox.provider}/{sandbox.sandbox_id}"
+
+    @staticmethod
+    def _parse_sandbox_ref(ref: str) -> tuple[str, str]:
+        prefix = "sandbox://"
+        if not ref.startswith(prefix):
+            raise ValueError(f"unsupported sandbox ref: {ref}")
+        provider, separator, sandbox_id = ref[len(prefix):].partition("/")
+        if not separator or not provider or not sandbox_id:
+            raise ValueError(f"invalid sandbox ref: {ref}")
+        return provider, sandbox_id
+
+    def _ensure_binding(self, run: Run) -> SandboxBinding | None:
+        if run.sandbox_binding is not None:
+            return run.sandbox_binding
+        if run.sandbox_ref is None:
+            return None
+
+        provider, sandbox_id = self._parse_sandbox_ref(run.sandbox_ref)
+        run.sandbox_binding = SandboxBinding(
+            provider=provider,
+            sandbox_id=sandbox_id,
+            sandbox_ref=run.sandbox_ref,
+            snapshot_ref=run.sandbox_snapshot_ref,
+        )
+        return run.sandbox_binding
+
+    def _sandbox_from_binding(
+        self,
+        binding: SandboxBinding,
+        *,
+        session_id: str,
+        status: SandboxStatus = SandboxStatus.BOUND,
+    ) -> Sandbox:
+        return Sandbox(
+            sandbox_id=binding.sandbox_id,
+            provider=binding.provider,
+            status=status,
+            snapshot_ref=binding.snapshot_ref,
+            session_id=session_id,
+        )
+
+    def _current_sandbox(self, run: Run) -> Sandbox | None:
+        current = self._sandboxes.get(run.run_id)
+        if current is not None:
+            return current
+
+        binding = self._ensure_binding(run)
+        if binding is None:
+            return None
+
+        status = (
+            SandboxStatus.PAUSED
+            if run.status == RunStatus.PAUSED
+            else SandboxStatus.BOUND
+        )
+        current = self._sandbox_from_binding(
+            binding,
+            session_id=run.session_id,
+            status=status,
+        )
+        self._sandboxes[run.run_id] = current
+        return current
+
+    def _replace_sandbox(
+        self,
+        run: Run,
+        sandbox: Sandbox,
+        *,
+        previous: SandboxBinding | None,
+        rebind_key: str | None,
+    ) -> Run:
+        sandbox_ref = self._sandbox_ref(sandbox)
+        previous_refs = list(previous.previous_refs) if previous else []
+        pending_cleanup_refs = (
+            list(previous.pending_cleanup_refs)
+            if previous
+            else []
+        )
+
+        if previous is not None and previous.sandbox_ref != sandbox_ref:
+            if previous.sandbox_ref not in previous_refs:
+                previous_refs.append(previous.sandbox_ref)
+            if previous.sandbox_ref not in pending_cleanup_refs:
+                pending_cleanup_refs.append(previous.sandbox_ref)
+
+        binding = SandboxBinding(
+            provider=sandbox.provider,
+            sandbox_id=sandbox.sandbox_id,
+            sandbox_ref=sandbox_ref,
+            revision=(previous.revision + 1) if previous else 1,
+            snapshot_ref=sandbox.snapshot_ref,
+            previous_refs=previous_refs,
+            pending_cleanup_refs=pending_cleanup_refs,
+            last_rebind_key=rebind_key,
+        )
+
+        run.sandbox_ref = sandbox_ref
+        run.sandbox_snapshot_ref = sandbox.snapshot_ref
+        run.sandbox_binding = binding
+
+        try:
+            self.store.save_run(run)
+        except Exception:
+            # A replacement that was allocated but never durably bound to the
+            # canonical Run is an orphan. Best-effort cleanup keeps a failed
+            # store write from leaking provider execution.
+            self.sandbox_provider.terminate(sandbox)
+            raise
+
+        self._sandboxes[run.run_id] = sandbox
+        return self.cleanup_retired_sandboxes(run.run_id)
+
+    def cleanup_retired_sandboxes(self, run_id: str) -> Run:
+        """Retry cleanup for sandboxes retired by a durable replacement."""
+        run = self.store.get_run(run_id)
+        binding = self._ensure_binding(run)
+        if binding is None or not binding.pending_cleanup_refs:
+            return run
+        if self.sandbox_provider is None:
+            return run
+
+        remaining: list[str] = []
+        changed = False
+
+        for ref in binding.pending_cleanup_refs:
+            try:
+                provider, sandbox_id = self._parse_sandbox_ref(ref)
+                if provider != self.sandbox_provider.name:
+                    remaining.append(ref)
+                    continue
+                retired = Sandbox(
+                    sandbox_id=sandbox_id,
+                    provider=provider,
+                    status=SandboxStatus.BOUND,
+                    session_id=run.session_id,
+                )
+                self.sandbox_provider.terminate(retired)
+                changed = True
+            except Exception:
+                remaining.append(ref)
+
+        if changed or remaining != binding.pending_cleanup_refs:
+            binding.pending_cleanup_refs = remaining
+            run.sandbox_binding = binding
+            self.store.save_run(run)
+
+        return run
 
     def create_session(
         self,
@@ -88,8 +245,11 @@ class AgentRuntime:
                 session_id=session_id,
             )
             self._sandboxes[run_id] = sandbox
-            run.sandbox_ref = (
-                f"sandbox://{sandbox.provider}/{sandbox.sandbox_id}"
+            run.sandbox_ref = self._sandbox_ref(sandbox)
+            run.sandbox_binding = SandboxBinding(
+                provider=sandbox.provider,
+                sandbox_id=sandbox.sandbox_id,
+                sandbox_ref=run.sandbox_ref,
             )
 
         self.store.save_run(run)
@@ -175,11 +335,16 @@ class AgentRuntime:
         if run.status != RunStatus.RUNNING:
             raise ValueError("only a running run can be paused")
 
-        if self.sandbox_provider is not None and run_id in self._sandboxes:
-            sandbox = self.sandbox_provider.snapshot(
-                self._sandboxes[run_id]
-            )
-            run.sandbox_snapshot_ref = sandbox.snapshot_ref
+        if self.sandbox_provider is not None:
+            current = self._current_sandbox(run)
+            if current is not None:
+                sandbox = self.sandbox_provider.snapshot(current)
+                self._sandboxes[run_id] = sandbox
+                run.sandbox_snapshot_ref = sandbox.snapshot_ref
+                binding = self._ensure_binding(run)
+                if binding is not None:
+                    binding.snapshot_ref = sandbox.snapshot_ref
+                    run.sandbox_binding = binding
 
         run.status = RunStatus.PAUSED
         self.store.save_run(run)
@@ -194,13 +359,17 @@ class AgentRuntime:
             self.sandbox_provider is not None
             and run.sandbox_snapshot_ref is not None
         ):
+            previous = self._ensure_binding(run)
             sandbox = self.sandbox_provider.resume(
                 run.sandbox_snapshot_ref,
                 session_id=run.session_id,
             )
-            self._sandboxes[run_id] = sandbox
-            run.sandbox_ref = (
-                f"sandbox://{sandbox.provider}/{sandbox.sandbox_id}"
+            run.status = RunStatus.RUNNING
+            return self._replace_sandbox(
+                run,
+                sandbox,
+                previous=previous,
+                rebind_key=f"resume:{run.sandbox_snapshot_ref}",
             )
 
         run.status = RunStatus.RUNNING
@@ -212,6 +381,7 @@ class AgentRuntime:
         run_id: str,
         *,
         snapshot_ref: str | None = None,
+        rebind_key: str | None = None,
     ) -> Run:
         """Replace sandbox execution while preserving canonical Run/Workflow identity."""
         run = self.store.get_run(run_id)
@@ -223,15 +393,24 @@ class AgentRuntime:
         if self.sandbox_provider is None:
             raise ValueError("sandbox provider is required for rebind")
 
-        previous = self._sandboxes.get(run_id)
+        previous = self._ensure_binding(run)
         restore_ref = snapshot_ref or run.sandbox_snapshot_ref
+        effective_key = rebind_key
+        if effective_key is None and restore_ref is not None:
+            effective_key = f"snapshot:{restore_ref}"
+
+        if (
+            effective_key is not None
+            and previous is not None
+            and previous.last_rebind_key == effective_key
+        ):
+            return run
 
         if restore_ref is not None:
             sandbox = self.sandbox_provider.resume(
                 restore_ref,
                 session_id=run.session_id,
             )
-            run.sandbox_snapshot_ref = restore_ref
         else:
             sandbox = self.sandbox_provider.allocate()
             sandbox = self.sandbox_provider.bind(
@@ -239,20 +418,12 @@ class AgentRuntime:
                 session_id=run.session_id,
             )
 
-        self._sandboxes[run_id] = sandbox
-        run.sandbox_ref = (
-            f"sandbox://{sandbox.provider}/{sandbox.sandbox_id}"
+        return self._replace_sandbox(
+            run,
+            sandbox,
+            previous=previous,
+            rebind_key=effective_key,
         )
-        self.store.save_run(run)
-
-        if (
-            previous is not None
-            and previous is not sandbox
-            and previous.status != SandboxStatus.TERMINATED
-        ):
-            self.sandbox_provider.terminate(previous)
-
-        return run
 
     def pause_session(self, session_id: str) -> Session:
         session = self.store.get_session(session_id)

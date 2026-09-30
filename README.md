@@ -75,6 +75,29 @@ provider-neutral runtime state
 complete + evidence refs
 ```
 
+## Durable sandbox recovery
+
+Sandbox execution identity is explicitly disposable. Each Run persists a
+`SandboxBinding` with provider identity, binding revision, snapshot reference,
+replacement history, retryable cleanup refs and an idempotency key for rebind.
+
+This makes the recovery contract survive a runtime-process restart:
+
+```text
+Run / Workflow identity stays stable
+        |
+Sandbox A -> snapshot/loss
+        |
+persisted SandboxBinding
+        |
+Sandbox B -> rebind/resume
+        |
+artifact/evidence refs preserved
+```
+
+Provider cleanup happens after the new binding is durable; failed cleanup remains
+recorded and retryable rather than being hidden.
+
 ## Evidence archive boundary
 
 The v3.2 evidence path is implemented as a separate execution-evidence boundary rather than a second tracing database:
