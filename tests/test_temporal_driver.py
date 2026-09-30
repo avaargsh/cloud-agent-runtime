@@ -1,6 +1,11 @@
 import asyncio
 
-from cloud_agent_runtime.temporal_driver import TemporalWorkflowDriver
+import pytest
+
+from cloud_agent_runtime.temporal_driver import (
+    TemporalWorkflowConflict,
+    TemporalWorkflowDriver,
+)
 
 
 class FakeHandle:
@@ -9,12 +14,16 @@ class FakeHandle:
     def __init__(self):
         self.signals = []
         self.terminations = []
+        self.status = "RUNNING"
 
     async def signal(self, name, payload):
         self.signals.append((name, payload))
 
     async def terminate(self, *, reason):
         self.terminations.append(reason)
+
+    async def describe(self):
+        return {"status": self.status}
 
 
 class FakeClient:
@@ -106,5 +115,68 @@ def test_temporal_driver_attaches_when_workflow_id_already_exists() -> None:
 
         assert ref.workflow_id == "agent-run-run-123"
         assert ref.run_id == "temporal-run-1"
+
+    asyncio.run(scenario())
+
+
+
+def test_temporal_driver_rejects_terminal_existing_workflow() -> None:
+    async def scenario():
+        from temporalio.exceptions import WorkflowAlreadyStartedError
+
+        client = FakeClient()
+        client.handle.status = "COMPLETED"
+
+        async def already_started(*args, **kwargs):
+            raise WorkflowAlreadyStartedError(
+                "agent-run-run-123",
+                "temporal-run-existing",
+            )
+
+        client.start_workflow = already_started
+        driver = TemporalWorkflowDriver(
+            client=client,
+            task_queue="agent-runs",
+        )
+
+        with pytest.raises(
+            TemporalWorkflowConflict,
+            match="existing Temporal workflow is terminal",
+        ):
+            await driver.start_run(
+                runtime_run_id="run-123",
+                session_id="session-456",
+            )
+
+    asyncio.run(scenario())
+
+
+def test_temporal_driver_rejects_duplicate_when_status_cannot_be_verified() -> None:
+    async def scenario():
+        from temporalio.exceptions import WorkflowAlreadyStartedError
+
+        client = FakeClient()
+        client.handle.describe = None
+
+        async def already_started(*args, **kwargs):
+            raise WorkflowAlreadyStartedError(
+                "agent-run-run-123",
+                "temporal-run-existing",
+            )
+
+        client.start_workflow = already_started
+        driver = TemporalWorkflowDriver(
+            client=client,
+            task_queue="agent-runs",
+        )
+
+        with pytest.raises(
+            TemporalWorkflowConflict,
+            match="cannot verify existing Temporal workflow status",
+        ):
+            await driver.start_run(
+                runtime_run_id="run-123",
+                session_id="session-456",
+            )
 
     asyncio.run(scenario())
