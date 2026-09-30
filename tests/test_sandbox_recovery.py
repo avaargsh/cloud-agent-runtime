@@ -218,6 +218,19 @@ class FailingRunStore(InMemoryStore):
         raise RuntimeError("simulated run persistence failure")
 
 
+class FailOnRunSaveNumberStore(InMemoryStore):
+    def __init__(self, fail_on: int):
+        super().__init__()
+        self.fail_on = fail_on
+        self.save_count = 0
+
+    def save_run(self, run):
+        self.save_count += 1
+        if self.save_count == self.fail_on:
+            raise RuntimeError("simulated run persistence failure")
+        return super().save_run(run)
+
+
 class ToggleFailRunStore(InMemoryStore):
     def __init__(self):
         super().__init__()
@@ -366,7 +379,10 @@ def test_start_run_cleans_sandbox_when_workflow_start_fails():
     ]
     assert provider.allocated[0].status.value == "terminated"
     assert runtime._sandboxes == {}
-    assert runtime.store.runs == {}
+    runs = list(runtime.store.runs.values())
+    assert len(runs) == 1
+    assert runs[0].status.value == "failed"
+    assert runs[0].workflow_ref is None
 
 
 def test_failed_rebind_restores_old_binding_and_cache():
@@ -435,3 +451,69 @@ def test_failed_resume_restores_paused_status_and_binding():
     assert persisted.sandbox_ref == original_ref
     assert persisted.sandbox_binding == original_binding
     assert runtime._sandboxes[run.run_id] is original_cache
+
+
+
+class CancelFailWorkflowDriver(InMemoryWorkflowDriver):
+    def cancel_run(self, workflow):
+        raise RuntimeError("simulated workflow cancel failure")
+
+
+def test_workflow_binding_persistence_failure_cancels_workflow():
+    store = FailOnRunSaveNumberStore(fail_on=2)
+    provider = TrackingProvider()
+    workflow = InMemoryWorkflowDriver()
+    runtime = AgentRuntime(
+        store=store,
+        sandbox_provider=provider,
+        workflow_driver=workflow,
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="simulated run persistence failure",
+    ):
+        runtime.start_run(session_id=session.session_id)
+
+    runs = list(store.runs.values())
+    assert len(runs) == 1
+    assert runs[0].status.value == "failed"
+    assert runs[0].workflow_ref is None
+    assert len(workflow.cancelled) == 1
+    assert provider.terminated == [
+        provider.allocated[0].sandbox_id
+    ]
+    assert runtime._sandboxes == {}
+
+
+def test_cancel_failure_retains_workflow_ref_for_recovery():
+    store = FailOnRunSaveNumberStore(fail_on=2)
+    provider = TrackingProvider()
+    workflow = CancelFailWorkflowDriver()
+    runtime = AgentRuntime(
+        store=store,
+        sandbox_provider=provider,
+        workflow_driver=workflow,
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="simulated run persistence failure",
+    ):
+        runtime.start_run(session_id=session.session_id)
+
+    runs = list(store.runs.values())
+    assert len(runs) == 1
+    assert runs[0].status.value == "failed"
+    assert runs[0].workflow_ref is not None
+    assert runtime._sandboxes == {}
