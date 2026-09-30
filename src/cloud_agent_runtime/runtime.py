@@ -392,23 +392,35 @@ class AgentRuntime:
         )
         if approval is None:
             raise KeyError(f"unknown approval: {approval_id}")
-        if approval.status != ApprovalStatus.PENDING:
-            raise ValueError("approval is already resolved")
 
-        approval.status = (
+        target_status = (
             ApprovalStatus.APPROVED
             if approved
             else ApprovalStatus.DENIED
         )
-        approval.actor = actor
-        approval.reason = reason
 
-        run.status = (
-            RunStatus.RUNNING
-            if approved
-            else RunStatus.FAILED
-        )
-        self.store.save_run(run)
+        if approval.status == ApprovalStatus.PENDING:
+            approval.status = target_status
+            approval.actor = actor
+            approval.reason = reason
+            run.status = (
+                RunStatus.RUNNING
+                if approved
+                else RunStatus.FAILED
+            )
+            self.store.save_run(run)
+        else:
+            # Resolution is durable before the external workflow signal.
+            # A retry with the same intent must be allowed so a transient
+            # signal failure cannot permanently split Run and Workflow state.
+            if approval.status != target_status:
+                raise ValueError(
+                    "approval is already resolved with a different outcome"
+                )
+            if approval.actor != actor or approval.reason != reason:
+                raise ValueError(
+                    "approval retry metadata differs from durable resolution"
+                )
 
         if self.workflow_driver is not None and run.workflow_ref is not None:
             self.workflow_driver.signal(
@@ -416,9 +428,10 @@ class AgentRuntime:
                 name="approval_resolved",
                 payload={
                     "approval_id": approval_id,
-                    "approved": approved,
-                    "actor": actor,
-                    "reason": reason,
+                    "approved": approval.status
+                    == ApprovalStatus.APPROVED,
+                    "actor": approval.actor,
+                    "reason": approval.reason,
                     "evidence_refs": list(approval.evidence_refs),
                 },
             )
