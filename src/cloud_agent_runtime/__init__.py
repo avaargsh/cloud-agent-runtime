@@ -12,6 +12,13 @@ from .contracts import (
     CapabilityBinding,
     EvidenceRef,
 )
+from .evidence_collector import (
+    AppendOnlyEvidenceCollector,
+    EvidenceEvent,
+    EvidenceIntegrityError,
+    EvidenceRecord,
+    Provenance,
+)
 from .kubernetes_sandbox import KubernetesSandboxProvider
 from .models import Run, RunStatus, Session, SessionStatus
 from .runtime import AgentRuntime
@@ -23,10 +30,18 @@ from .sandbox import (
 from .store import InMemoryStore, SQLiteStore
 from .temporal_bridge import TemporalRunBridge, TemporalRunStatus
 from .temporal_driver import TemporalWorkflowDriver
+from .tool_contract import (
+    RetryableToolError,
+    ToolContract,
+    ToolContractViolation,
+    ToolExecutionReceipt,
+    execute_tool,
+)
 from .workflow import InMemoryWorkflowDriver, WorkflowRef
 
 __all__ = [
     "AgentRuntime",
+    "AppendOnlyEvidenceCollector",
     "Approval",
     "ApprovalStatus",
     "ArtifactRef",
@@ -34,6 +49,9 @@ __all__ = [
     "AsyncWorkflowDriver",
     "Budget",
     "CapabilityBinding",
+    "EvidenceEvent",
+    "EvidenceIntegrityError",
+    "EvidenceRecord",
     "EvidenceRef",
     "InMemoryAsyncWorkflowDriver",
     "InMemorySandboxProvider",
@@ -41,6 +59,8 @@ __all__ = [
     "InMemoryWorkflowDriver",
     "KubernetesSandboxProvider",
     "LocalArtifactStore",
+    "Provenance",
+    "RetryableToolError",
     "Run",
     "RunStatus",
     "SQLiteStore",
@@ -51,5 +71,9 @@ __all__ = [
     "TemporalRunBridge",
     "TemporalRunStatus",
     "TemporalWorkflowDriver",
+    "ToolContract",
+    "ToolContractViolation",
+    "ToolExecutionReceipt",
     "WorkflowRef",
+    "execute_tool",
 ]
