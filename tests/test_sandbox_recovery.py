@@ -6,6 +6,7 @@ from cloud_agent_runtime import (
     InMemoryWorkflowDriver,
     SQLiteStore,
 )
+from cloud_agent_runtime.store import InMemoryStore
 
 
 class FailOnceTerminateProvider(InMemorySandboxProvider):
@@ -209,3 +210,228 @@ def test_failed_old_sandbox_cleanup_is_recorded_and_retryable():
 
     cleaned = runtime.cleanup_retired_sandboxes(run.run_id)
     assert cleaned.sandbox_binding.pending_cleanup_refs == []
+
+
+
+class FailingRunStore(InMemoryStore):
+    def save_run(self, run):
+        raise RuntimeError("simulated run persistence failure")
+
+
+class ToggleFailRunStore(InMemoryStore):
+    def __init__(self):
+        super().__init__()
+        self.fail_runs = False
+
+    def save_run(self, run):
+        if self.fail_runs:
+            raise RuntimeError("simulated run persistence failure")
+        return super().save_run(run)
+
+
+class FailingWorkflowDriver:
+    name = "failing-workflow"
+
+    def start_run(self, *, runtime_run_id: str, session_id: str):
+        raise RuntimeError("simulated workflow start failure")
+
+    def signal(self, workflow, *, name: str, payload: dict):
+        return None
+
+
+class TrackingProvider(InMemorySandboxProvider):
+    def __init__(self):
+        self.allocated = []
+        self.terminated = []
+
+    def allocate(self):
+        sandbox = super().allocate()
+        self.allocated.append(sandbox)
+        return sandbox
+
+    def terminate(self, sandbox):
+        self.terminated.append(sandbox.sandbox_id)
+        return super().terminate(sandbox)
+
+
+class BindFailProvider(TrackingProvider):
+    def bind(self, sandbox, *, session_id: str):
+        raise RuntimeError("simulated bind failure")
+
+
+class CleanupFailProvider(TrackingProvider):
+    def terminate(self, sandbox):
+        self.terminated.append(sandbox.sandbox_id)
+        raise RuntimeError("simulated cleanup failure")
+
+
+def test_start_run_cleans_allocated_sandbox_when_bind_fails():
+    provider = BindFailProvider()
+    runtime = AgentRuntime(
+        sandbox_provider=provider,
+        workflow_driver=None,
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+
+    with pytest.raises(RuntimeError, match="simulated bind failure"):
+        runtime.start_run(session_id=session.session_id)
+
+    assert len(provider.allocated) == 1
+    assert provider.terminated == [
+        provider.allocated[0].sandbox_id
+    ]
+    assert provider.allocated[0].status.value == "terminated"
+    assert runtime._sandboxes == {}
+
+
+def test_start_run_cleans_bound_sandbox_when_persistence_fails():
+    provider = TrackingProvider()
+    runtime = AgentRuntime(
+        store=FailingRunStore(),
+        sandbox_provider=provider,
+        workflow_driver=None,
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="simulated run persistence failure",
+    ):
+        runtime.start_run(session_id=session.session_id)
+
+    assert len(provider.allocated) == 1
+    assert provider.terminated == [
+        provider.allocated[0].sandbox_id
+    ]
+    assert provider.allocated[0].status.value == "terminated"
+    assert runtime._sandboxes == {}
+
+
+def test_cleanup_failure_does_not_mask_persistence_failure():
+    provider = CleanupFailProvider()
+    runtime = AgentRuntime(
+        store=FailingRunStore(),
+        sandbox_provider=provider,
+        workflow_driver=None,
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="simulated run persistence failure",
+    ):
+        runtime.start_run(session_id=session.session_id)
+
+    assert len(provider.allocated) == 1
+    assert provider.terminated == [
+        provider.allocated[0].sandbox_id
+    ]
+    assert runtime._sandboxes == {}
+
+
+
+def test_start_run_cleans_sandbox_when_workflow_start_fails():
+    provider = TrackingProvider()
+    runtime = AgentRuntime(
+        sandbox_provider=provider,
+        workflow_driver=FailingWorkflowDriver(),
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="simulated workflow start failure",
+    ):
+        runtime.start_run(session_id=session.session_id)
+
+    assert len(provider.allocated) == 1
+    assert provider.terminated == [
+        provider.allocated[0].sandbox_id
+    ]
+    assert provider.allocated[0].status.value == "terminated"
+    assert runtime._sandboxes == {}
+    assert runtime.store.runs == {}
+
+
+def test_failed_rebind_restores_old_binding_and_cache():
+    store = ToggleFailRunStore()
+    provider = CleanupFailProvider()
+    runtime = AgentRuntime(
+        store=store,
+        sandbox_provider=provider,
+        workflow_driver=InMemoryWorkflowDriver(),
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+    original_ref = run.sandbox_ref
+    original_binding = run.sandbox_binding
+    original_cache = runtime._sandboxes[run.run_id]
+
+    store.fail_runs = True
+    with pytest.raises(
+        RuntimeError,
+        match="simulated run persistence failure",
+    ):
+        runtime.rebind_run_sandbox(
+            run.run_id,
+            rebind_key="failed-rebind",
+        )
+
+    persisted = store.get_run(run.run_id)
+    assert persisted.sandbox_ref == original_ref
+    assert persisted.sandbox_binding == original_binding
+    assert runtime._sandboxes[run.run_id] is original_cache
+    assert provider.terminated[-1] != original_cache.sandbox_id
+
+
+def test_failed_resume_restores_paused_status_and_binding():
+    store = ToggleFailRunStore()
+    provider = TrackingProvider()
+    runtime = AgentRuntime(
+        store=store,
+        sandbox_provider=provider,
+        workflow_driver=InMemoryWorkflowDriver(),
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+    paused = runtime.pause_run(run.run_id)
+    original_ref = paused.sandbox_ref
+    original_binding = paused.sandbox_binding
+    original_cache = runtime._sandboxes[run.run_id]
+
+    store.fail_runs = True
+    with pytest.raises(
+        RuntimeError,
+        match="simulated run persistence failure",
+    ):
+        runtime.resume_run(run.run_id)
+
+    persisted = store.get_run(run.run_id)
+    assert persisted.status.value == "paused"
+    assert persisted.sandbox_ref == original_ref
+    assert persisted.sandbox_binding == original_binding
+    assert runtime._sandboxes[run.run_id] is original_cache
