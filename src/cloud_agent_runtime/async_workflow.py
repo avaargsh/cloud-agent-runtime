@@ -25,9 +25,11 @@ class AsyncWorkflowDriver(Protocol):
     ) -> None:
         ...
 
-    async def cancel_run(
+    async def terminate_run(
         self,
         workflow: WorkflowRef,
+        *,
+        reason: str,
     ) -> None:
         ...
 
@@ -37,7 +39,7 @@ class InMemoryAsyncWorkflowDriver:
 
     def __init__(self) -> None:
         self.signals: list[tuple[str, str, dict]] = []
-        self.cancelled: list[str] = []
+        self.terminated: list[tuple[str, str]] = []
 
     async def start_run(
         self,
@@ -67,8 +69,10 @@ class InMemoryAsyncWorkflowDriver:
         )
 
 
-    async def cancel_run(
+    async def terminate_run(
         self,
         workflow: WorkflowRef,
+        *,
+        reason: str,
     ) -> None:
-        self.cancelled.append(workflow.workflow_id)
+        self.terminated.append((workflow.workflow_id, reason))
