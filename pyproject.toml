@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Reference runtime contracts for durable, isolated cloud Agents."
 readme = "README.md"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "Ben Lee" }]
 keywords = ["agent-runtime", "temporal", "durable-execution", "sandbox", "agent-infrastructure"]
 requires-python = ">=3.11"
