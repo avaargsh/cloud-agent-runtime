@@ -547,6 +547,8 @@ class AgentRuntime:
             and previous is not None
             and previous.last_rebind_key == effective_key
         ):
+            if previous.pending_cleanup_refs:
+                return self.cleanup_retired_sandboxes(run.run_id)
             return run
 
         if restore_ref is not None:
