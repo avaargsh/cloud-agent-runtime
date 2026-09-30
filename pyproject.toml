@@ -22,6 +22,9 @@ dev = [
 temporal = [
   "temporalio>=1.33,<2",
 ]
+s3 = [
+  "boto3>=1.40,<2",
+]
 
 [project.scripts]
 cloud-agent-runtime-worker = "cloud_agent_runtime.temporal_worker:main"
