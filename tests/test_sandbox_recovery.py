@@ -561,3 +561,41 @@ def test_failed_pause_persistence_restores_running_cache_and_is_retryable():
     assert paused.status.value == "paused"
     assert paused.sandbox_snapshot_ref is not None
     assert runtime._sandboxes[run.run_id].status.value == "paused"
+
+
+
+def test_rebind_cleans_allocated_sandbox_when_bind_fails():
+    healthy = TrackingProvider()
+    runtime = AgentRuntime(
+        sandbox_provider=healthy,
+        workflow_driver=InMemoryWorkflowDriver(),
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+    original_ref = run.sandbox_ref
+    original_binding = run.sandbox_binding
+    original_cache = runtime._sandboxes[run.run_id]
+
+    failing = BindFailProvider()
+    runtime.sandbox_provider = failing
+
+    with pytest.raises(RuntimeError, match="simulated bind failure"):
+        runtime.rebind_run_sandbox(
+            run.run_id,
+            rebind_key="bind-failure-recovery",
+        )
+
+    assert len(failing.allocated) == 1
+    assert failing.terminated == [
+        failing.allocated[0].sandbox_id
+    ]
+    assert failing.allocated[0].status.value == "terminated"
+
+    persisted = runtime.store.get_run(run.run_id)
+    assert persisted.sandbox_ref == original_ref
+    assert persisted.sandbox_binding == original_binding
+    assert runtime._sandboxes[run.run_id] is original_cache
