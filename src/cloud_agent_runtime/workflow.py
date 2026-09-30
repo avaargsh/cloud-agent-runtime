@@ -31,9 +31,11 @@ class WorkflowDriver(Protocol):
     ) -> None:
         ...
 
-    def cancel_run(
+    def terminate_run(
         self,
         workflow: WorkflowRef,
+        *,
+        reason: str,
     ) -> None:
         ...
 
@@ -42,7 +44,7 @@ class InMemoryWorkflowDriver:
     name = "in-memory"
 
     def __init__(self) -> None:
-        self.cancelled: list[str] = []
+        self.terminated: list[tuple[str, str]] = []
 
     def start_run(
         self,
@@ -65,8 +67,10 @@ class InMemoryWorkflowDriver:
     ) -> None:
         return None
 
-    def cancel_run(
+    def terminate_run(
         self,
         workflow: WorkflowRef,
+        *,
+        reason: str,
     ) -> None:
-        self.cancelled.append(workflow.workflow_id)
+        self.terminated.append((workflow.workflow_id, reason))
