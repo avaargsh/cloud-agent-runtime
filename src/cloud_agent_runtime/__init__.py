@@ -34,6 +34,7 @@ from .otel_evidence import (
     OTelSpanSnapshot,
 )
 from .runtime import AgentRuntime
+from .s3_object_store import S3ObjectStore
 from .sandbox import (
     InMemorySandboxProvider,
     Sandbox,
@@ -84,6 +85,7 @@ __all__ = [
     "RetryableToolError",
     "Run",
     "RunStatus",
+    "S3ObjectStore",
     "SQLiteStore",
     "Sandbox",
     "SandboxStatus",
