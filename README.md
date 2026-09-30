@@ -75,6 +75,28 @@ provider-neutral runtime state
 complete + evidence refs
 ```
 
+## Evidence archive boundary
+
+The v3.2 evidence path is implemented as a separate execution-evidence boundary rather than a second tracing database:
+
+```text
+OTel exported span
+      ↓
+EvidenceEvent + provenance
+      ↓
+AppendOnlyEvidenceCollector
+      ↓
+EvidenceArchive
+      ↓
+content-addressed evidence object + immutable manifest
+      ↓
+digest-verified replay
+```
+
+Evidence can carry canonical Run/Action identity, OTel trace/span identity, policy and artifact digests, and generated/observed/authorized/executed/committed provenance. `S3ObjectStore` provides the optional production-facing adapter for AWS S3 and S3-compatible endpoints such as MinIO or Ceph RGW. The live lifecycle Golden Slice intentionally validates semantics with the in-memory ObjectStore implementation; S3 compatibility is covered by adapter contract tests.
+
+See `docs/evidence-object-store.md`, `docs/s3-minio-evidence.md`, and `docs/agentos-v32-golden-slice.md`.
+
 ## Quick start
 
 ```bash
@@ -83,13 +105,14 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 pytest -q
 python examples/local_runtime.py
+python examples/otel_evidence_archive.py
 ```
 
 For the Temporal worker and provider-owned durable workflow path, see `docs/temporal-worker.md` and `docs/temporal.md`.
 
 ## Status
 
-Public pre-1.0 lifecycle-binding reference. Canonical identity, local sandbox recovery primitives, and a Temporal adapter are implemented; Temporal owns durable orchestration and workflow history; PostgreSQL/S3 adapters, production sandbox isolation, warm pools, tenant quotas, and Kubernetes/GPU scheduling integrations remain roadmap work.
+Public pre-1.0 lifecycle-binding reference. Canonical identity, local and Kubernetes sandbox recovery primitives, a Temporal adapter, OTel-to-Evidence projection, content-addressed EvidenceArchive, S3/MinIO/Ceph-compatible object storage, and policy-digest evidence binding are implemented. Temporal owns durable orchestration and workflow history. PostgreSQL runtime-state persistence, production sandbox isolation, storage-side retention enforcement, warm pools, tenant quotas, and Kubernetes/GPU scheduling integrations remain roadmap work.
 
 This repository is a thin **Run ↔ Workflow ↔ Sandbox lifecycle binding layer**. It does not own durable orchestration, placement policy, or sandbox implementation semantics. Bounded decisions are provided by `agent-decision-lab`.
 
