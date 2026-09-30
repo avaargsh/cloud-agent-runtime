@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .async_workflow import AsyncWorkflowDriver
-from .contracts import Approval, Budget
+from .contracts import Approval, ApprovalStatus, Budget
 from .models import Run, RunStatus
 from .runtime import AgentRuntime
 from .sandbox import SandboxProvider
@@ -126,9 +126,12 @@ class AsyncAgentRuntime(AgentRuntime):
                 name="approval_resolved",
                 payload={
                     "approval_id": approval_id,
-                    "approved": approved,
-                    "actor": actor,
-                    "reason": reason,
+                    "approved": (
+                        approval.status
+                        == ApprovalStatus.APPROVED
+                    ),
+                    "actor": approval.actor,
+                    "reason": approval.reason,
                     "evidence_refs": list(
                         approval.evidence_refs
                     ),

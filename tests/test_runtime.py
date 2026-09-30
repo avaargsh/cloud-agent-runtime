@@ -202,3 +202,136 @@ def test_paused_run_must_use_resume_not_rebind() -> None:
         match="use resume_run for paused recovery",
     ):
         rt.rebind_run_sandbox(run.run_id)
+
+
+
+class FailOnceApprovalSignalDriver(InMemoryWorkflowDriver):
+    def __init__(self):
+        super().__init__()
+        self.signal_attempts = 0
+        self.delivered = []
+
+    def signal(self, workflow, *, name: str, payload: dict):
+        self.signal_attempts += 1
+        if self.signal_attempts == 1:
+            raise RuntimeError("simulated workflow signal failure")
+        self.delivered.append(
+            (workflow.workflow_id, name, dict(payload))
+        )
+
+
+def test_approval_resolution_retry_redelivers_same_durable_signal() -> None:
+    driver = FailOnceApprovalSignalDriver()
+    rt = AgentRuntime(
+        sandbox_provider=InMemorySandboxProvider(),
+        workflow_driver=driver,
+    )
+    session = rt.create_session(
+        agent_id="coding-agent",
+        release_id="coding-agent-v1",
+        tenant_id="tenant-a",
+    )
+    run = rt.start_run(session_id=session.session_id)
+    approval = rt.request_approval(
+        run.run_id,
+        action="restart workload",
+        evidence_refs=["evidence://approval/input"],
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="simulated workflow signal failure",
+    ):
+        rt.resolve_approval(
+            run.run_id,
+            approval.approval_id,
+            approved=True,
+            actor="operator@example",
+            reason="approved after review",
+        )
+
+    persisted = rt.store.get_run(run.run_id)
+    assert persisted.status == RunStatus.RUNNING
+    assert persisted.approvals[0].status == ApprovalStatus.APPROVED
+
+    retried = rt.resolve_approval(
+        run.run_id,
+        approval.approval_id,
+        approved=True,
+        actor="operator@example",
+        reason="approved after review",
+    )
+
+    assert retried.status == ApprovalStatus.APPROVED
+    assert driver.signal_attempts == 2
+    assert driver.delivered[0][2] == {
+        "approval_id": approval.approval_id,
+        "approved": True,
+        "actor": "operator@example",
+        "reason": "approved after review",
+        "evidence_refs": ["evidence://approval/input"],
+    }
+
+
+def test_approval_resolution_retry_rejects_conflicting_outcome() -> None:
+    rt = runtime()
+    session = rt.create_session(
+        agent_id="coding-agent",
+        release_id="coding-agent-v1",
+        tenant_id="tenant-a",
+    )
+    run = rt.start_run(session_id=session.session_id)
+    approval = rt.request_approval(
+        run.run_id,
+        action="restart workload",
+    )
+    rt.resolve_approval(
+        run.run_id,
+        approval.approval_id,
+        approved=True,
+        actor="operator@example",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="different outcome",
+    ):
+        rt.resolve_approval(
+            run.run_id,
+            approval.approval_id,
+            approved=False,
+            actor="operator@example",
+        )
+
+
+def test_approval_resolution_retry_rejects_changed_audit_metadata() -> None:
+    rt = runtime()
+    session = rt.create_session(
+        agent_id="coding-agent",
+        release_id="coding-agent-v1",
+        tenant_id="tenant-a",
+    )
+    run = rt.start_run(session_id=session.session_id)
+    approval = rt.request_approval(
+        run.run_id,
+        action="restart workload",
+    )
+    rt.resolve_approval(
+        run.run_id,
+        approval.approval_id,
+        approved=True,
+        actor="operator@example",
+        reason="reviewed",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="metadata differs",
+    ):
+        rt.resolve_approval(
+            run.run_id,
+            approval.approval_id,
+            approved=True,
+            actor="other@example",
+            reason="reviewed",
+        )
