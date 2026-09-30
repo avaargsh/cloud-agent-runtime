@@ -8,9 +8,13 @@ class FakeHandle:
 
     def __init__(self):
         self.signals = []
+        self.cancelled = False
 
     async def signal(self, name, payload):
         self.signals.append((name, payload))
+
+    async def cancel(self):
+        self.cancelled = True
 
 
 class FakeClient:
@@ -75,6 +79,9 @@ def test_temporal_driver_uses_canonical_runtime_run_id() -> None:
                 {"approved": True},
             )
         ]
+
+        await driver.cancel_run(ref)
+        assert client.handle.cancelled is True
 
     asyncio.run(scenario())
 
