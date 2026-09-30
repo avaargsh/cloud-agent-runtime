@@ -126,9 +126,12 @@ class AsyncAgentRuntime(AgentRuntime):
                 name="approval_resolved",
                 payload={
                     "approval_id": approval_id,
-                    "approved": approved,
-                    "actor": actor,
-                    "reason": reason,
+                    "approved": (
+                        approval.status
+                        == ApprovalStatus.APPROVED
+                    ),
+                    "actor": approval.actor,
+                    "reason": approval.reason,
                     "evidence_refs": list(
                         approval.evidence_refs
                     ),
