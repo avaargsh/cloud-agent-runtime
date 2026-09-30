@@ -72,7 +72,7 @@ def test_async_workflow_start_failure_marks_run_failed() -> None:
         async def signal(self, *args, **kwargs):
             return None
 
-        async def cancel_run(self, workflow):
+        async def terminate_run(self, workflow, *, reason):
             return None
 
     async def scenario():
@@ -113,12 +113,12 @@ class FailOnRunSaveNumberStore(InMemoryStore):
         return super().save_run(run)
 
 
-class CancelFailAsyncDriver(InMemoryAsyncWorkflowDriver):
-    async def cancel_run(self, workflow):
-        raise RuntimeError("simulated async cancel failure")
+class TerminateFailAsyncDriver(InMemoryAsyncWorkflowDriver):
+    async def terminate_run(self, workflow, *, reason):
+        raise RuntimeError("simulated async termination failure")
 
 
-def test_async_binding_persistence_failure_cancels_workflow():
+def test_async_binding_persistence_failure_terminates_workflow():
     async def scenario():
         store = FailOnRunSaveNumberStore(fail_on=2)
         driver = InMemoryAsyncWorkflowDriver()
@@ -145,16 +145,17 @@ def test_async_binding_persistence_failure_cancels_workflow():
         assert len(runs) == 1
         assert runs[0].status == RunStatus.FAILED
         assert runs[0].workflow_ref is None
-        assert len(driver.cancelled) == 1
+        assert len(driver.terminated) == 1
+        assert driver.terminated[0][1] == "runtime binding persistence failed"
         assert runtime._sandboxes == {}
 
     asyncio.run(scenario())
 
 
-def test_async_cancel_failure_retains_workflow_ref():
+def test_async_termination_failure_retains_workflow_ref():
     async def scenario():
         store = FailOnRunSaveNumberStore(fail_on=2)
-        driver = CancelFailAsyncDriver()
+        driver = TerminateFailAsyncDriver()
         runtime = AsyncAgentRuntime(
             store=store,
             sandbox_provider=InMemorySandboxProvider(),
