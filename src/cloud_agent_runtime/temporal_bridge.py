@@ -41,11 +41,27 @@ class TemporalRunBridge:
         await self.driver.signal(workflow, name="approval_resolved", payload=payload)
 
     async def complete(self, workflow: WorkflowRef, *, result: dict[str, Any] | None = None, evidence_refs: Sequence[str] = ()) -> None:
-        await self.driver.signal(
-            workflow,
-            name="complete_run",
-            payload={"result": dict(result or {}), "evidence_refs": list(evidence_refs)},
-        )
+        # Completion is an idempotent bridge operation. A caller may retry after
+        # the Temporal workflow has already consumed the first complete_run signal
+        # and closed. In that case a second signal is invalid at the Temporal API
+        # boundary, but the requested post-condition is already satisfied.
+        state = await self.driver.query(workflow, name="run_state")
+        if bool(state.get("terminal", False)):
+            return
+
+        try:
+            await self.driver.signal(
+                workflow,
+                name="complete_run",
+                payload={"result": dict(result or {}), "evidence_refs": list(evidence_refs)},
+            )
+        except Exception:
+            # Close can race the pre-signal query. Confirm the durable terminal
+            # state before deciding whether the signal error is safe to absorb.
+            state = await self.driver.query(workflow, name="run_state")
+            if bool(state.get("terminal", False)):
+                return
+            raise
 
         # Temporal signal delivery is durable but workflow handling is asynchronous.
         # Do not return completion to the caller until the workflow has observed the

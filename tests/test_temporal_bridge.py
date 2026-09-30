@@ -65,3 +65,73 @@ def test_bridge_complete_waits_for_terminal_ack_and_attaches_final_evidence_refs
         assert client.handle.state["terminal"] is True
         assert client.handle.state["phase"] == "succeeded"
     asyncio.run(scenario())
+
+
+def test_bridge_complete_is_idempotent_after_terminal_state() -> None:
+    async def scenario():
+        client = FakeClient()
+        client.handle.state.update(
+            {
+                "phase": "succeeded",
+                "paused": False,
+                "terminal": True,
+            }
+        )
+        bridge = TemporalRunBridge(
+            TemporalWorkflowDriver(
+                client=client,
+                task_queue="agent-runs",
+            )
+        )
+        ref = await bridge.start_or_attach(
+            runtime_run_id="run-1",
+            session_id="session-1",
+        )
+
+        await bridge.complete(
+            ref,
+            result={"status": "VERIFIED"},
+            evidence_refs=("evidence://sha256/final",),
+        )
+
+        assert client.handle.signals == []
+
+    asyncio.run(scenario())
+
+
+def test_bridge_complete_accepts_close_race_when_terminal_is_durable() -> None:
+    class RacingHandle(FakeHandle):
+        async def signal(self, name, payload):
+            if name == "complete_run":
+                self.state.update(
+                    {
+                        "phase": "succeeded",
+                        "paused": False,
+                        "terminal": True,
+                    }
+                )
+                raise RuntimeError("workflow execution already completed")
+            await super().signal(name, payload)
+
+    async def scenario():
+        client = FakeClient()
+        client.handle = RacingHandle()
+        bridge = TemporalRunBridge(
+            TemporalWorkflowDriver(
+                client=client,
+                task_queue="agent-runs",
+            )
+        )
+        ref = await bridge.start_or_attach(
+            runtime_run_id="run-1",
+            session_id="session-1",
+        )
+
+        await bridge.complete(
+            ref,
+            result={"status": "VERIFIED"},
+        )
+
+        assert client.handle.state["terminal"] is True
+
+    asyncio.run(scenario())
