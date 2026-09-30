@@ -182,3 +182,76 @@ def test_async_termination_failure_retains_workflow_ref():
         assert runtime._sandboxes == {}
 
     asyncio.run(scenario())
+
+
+
+class FailOnceAsyncSignalDriver(InMemoryAsyncWorkflowDriver):
+    def __init__(self):
+        super().__init__()
+        self.signal_attempts = 0
+
+    async def signal(self, workflow, *, name: str, payload: dict):
+        self.signal_attempts += 1
+        if self.signal_attempts == 1:
+            raise RuntimeError("simulated async signal failure")
+        await super().signal(
+            workflow,
+            name=name,
+            payload=payload,
+        )
+
+
+def test_async_resolved_approval_retries_same_signal():
+    async def scenario():
+        driver = FailOnceAsyncSignalDriver()
+        runtime = AsyncAgentRuntime(
+            sandbox_provider=InMemorySandboxProvider(),
+            workflow_driver=driver,
+        )
+        session = runtime.create_session(
+            agent_id="sre-agent",
+            release_id="sre-agent-v1",
+            tenant_id="tenant-a",
+        )
+        run = await runtime.start_run(
+            session_id=session.session_id,
+        )
+        approval = runtime.request_approval(
+            run.run_id,
+            action="restart workload",
+            evidence_refs=["evidence://approval/input"],
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="simulated async signal failure",
+        ):
+            await runtime.resolve_approval(
+                run.run_id,
+                approval.approval_id,
+                approved=True,
+                actor="operator@example",
+                reason="approved after review",
+            )
+
+        persisted = runtime.store.get_run(run.run_id)
+        assert persisted.status == RunStatus.RUNNING
+        assert (
+            persisted.approvals[0].status
+            == ApprovalStatus.APPROVED
+        )
+
+        retried = await runtime.resolve_approval(
+            run.run_id,
+            approval.approval_id,
+            approved=True,
+            actor="operator@example",
+            reason="approved after review",
+        )
+
+        assert retried.status == ApprovalStatus.APPROVED
+        assert driver.signal_attempts == 2
+        assert driver.signals[0][2]["approved"] is True
+        assert driver.signals[0][2]["actor"] == "operator@example"
+
+    asyncio.run(scenario())
