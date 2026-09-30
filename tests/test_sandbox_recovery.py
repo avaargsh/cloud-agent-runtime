@@ -25,6 +25,39 @@ class FailingResumeProvider(InMemorySandboxProvider):
         raise RuntimeError("simulated restore failure")
 
 
+class CountingSandboxProvider(InMemorySandboxProvider):
+    def __init__(self) -> None:
+        self.allocated_ids: list[str] = []
+        self.terminated_ids: list[str] = []
+
+    def allocate(self):
+        sandbox = super().allocate()
+        self.allocated_ids.append(sandbox.sandbox_id)
+        return sandbox
+
+    def terminate(self, sandbox):
+        self.terminated_ids.append(sandbox.sandbox_id)
+        return super().terminate(sandbox)
+
+
+class FailOnceCleanupCommitStore(InMemoryStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    def save_run(self, run):
+        binding = run.sandbox_binding
+        if (
+            not self.failed
+            and binding is not None
+            and binding.last_rebind_key == "cleanup-commit-replay"
+            and binding.pending_cleanup_refs == []
+        ):
+            self.failed = True
+            raise RuntimeError("simulated cleanup persistence failure")
+        return super().save_run(run)
+
+
 def test_run_survives_sandbox_replacement_with_durable_refs():
     runtime = AgentRuntime(
         sandbox_provider=InMemorySandboxProvider(),
@@ -631,3 +664,50 @@ def test_rebind_replay_retries_pending_cleanup_without_new_replacement():
     assert replay.sandbox_ref == first_ref
     assert replay.sandbox_binding.revision == first_revision
     assert replay.sandbox_binding.pending_cleanup_refs == []
+
+def test_rebind_replay_recovers_when_cleanup_commit_fails_after_termination():
+    store = FailOnceCleanupCommitStore()
+    provider = CountingSandboxProvider()
+    runtime = AgentRuntime(
+        store=store,
+        sandbox_provider=provider,
+        workflow_driver=InMemoryWorkflowDriver(),
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+    original_ref = run.sandbox_ref
+    assert original_ref is not None
+
+    with pytest.raises(
+        RuntimeError,
+        match="simulated cleanup persistence failure",
+    ):
+        runtime.rebind_run_sandbox(
+            run.run_id,
+            rebind_key="cleanup-commit-replay",
+        )
+
+    persisted = store.get_run(run.run_id)
+    replacement_ref = persisted.sandbox_ref
+    assert replacement_ref is not None
+    assert replacement_ref != original_ref
+    assert persisted.sandbox_binding is not None
+    assert persisted.sandbox_binding.pending_cleanup_refs == [original_ref]
+    allocations_after_failed_commit = len(provider.allocated_ids)
+
+    replay = runtime.rebind_run_sandbox(
+        run.run_id,
+        rebind_key="cleanup-commit-replay",
+    )
+
+    assert replay.sandbox_ref == replacement_ref
+    assert replay.sandbox_binding is not None
+    assert replay.sandbox_binding.pending_cleanup_refs == []
+    assert len(provider.allocated_ids) == allocations_after_failed_commit
+    original_id = original_ref.rsplit("/", 1)[-1]
+    assert provider.terminated_ids.count(original_id) == 2
+
