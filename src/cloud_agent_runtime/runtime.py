@@ -115,21 +115,24 @@ class AgentRuntime:
             # Cleanup must never mask the primary allocation/persistence error.
             pass
 
-    def _best_effort_cancel_workflow(
+    def _best_effort_terminate_workflow(
         self,
         workflow,
     ) -> bool:
         if self.workflow_driver is None:
             return False
-        cancel = getattr(
+        terminate = getattr(
             self.workflow_driver,
-            "cancel_run",
+            "terminate_run",
             None,
         )
-        if cancel is None:
+        if terminate is None:
             return False
         try:
-            cancel(workflow)
+            terminate(
+                workflow,
+                reason="runtime binding persistence failed",
+            )
             return True
         except Exception:
             return False
@@ -333,11 +336,11 @@ class AgentRuntime:
         try:
             self.store.save_run(run)
         except Exception:
-            cancelled = self._best_effort_cancel_workflow(
+            terminated = self._best_effort_terminate_workflow(
                 workflow_ref
             )
             run.status = RunStatus.FAILED
-            if cancelled:
+            if terminated:
                 run.workflow_ref = None
             self._best_effort_save_failed_run(run)
             if owned_sandbox is not None:
