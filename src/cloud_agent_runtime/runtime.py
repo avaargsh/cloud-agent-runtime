@@ -103,6 +103,18 @@ class AgentRuntime:
         self._sandboxes[run.run_id] = current
         return current
 
+    def _best_effort_terminate(
+        self,
+        sandbox: Sandbox,
+    ) -> None:
+        if self.sandbox_provider is None:
+            return
+        try:
+            self.sandbox_provider.terminate(sandbox)
+        except Exception:
+            # Cleanup must never mask the primary allocation/persistence error.
+            pass
+
     def _replace_sandbox(
         self,
         run: Run,
@@ -144,9 +156,10 @@ class AgentRuntime:
             self.store.save_run(run)
         except Exception:
             # A replacement that was allocated but never durably bound to the
-            # canonical Run is an orphan. Best-effort cleanup keeps a failed
-            # store write from leaking provider execution.
-            self.sandbox_provider.terminate(sandbox)
+            # canonical Run is an orphan. Cleanup must not mask the original
+            # persistence failure.
+            self._best_effort_terminate(sandbox)
+            self._sandboxes.pop(run.run_id, None)
             raise
 
         self._sandboxes[run.run_id] = sandbox
@@ -238,21 +251,33 @@ class AgentRuntime:
             budget=budget,
         )
 
+        owned_sandbox: Sandbox | None = None
         if sandbox_ref is None and self.sandbox_provider is not None:
-            sandbox = self.sandbox_provider.allocate()
-            sandbox = self.sandbox_provider.bind(
-                sandbox,
-                session_id=session_id,
-            )
-            self._sandboxes[run_id] = sandbox
-            run.sandbox_ref = self._sandbox_ref(sandbox)
+            allocated = self.sandbox_provider.allocate()
+            try:
+                owned_sandbox = self.sandbox_provider.bind(
+                    allocated,
+                    session_id=session_id,
+                )
+            except Exception:
+                self._best_effort_terminate(allocated)
+                raise
+
+            self._sandboxes[run_id] = owned_sandbox
+            run.sandbox_ref = self._sandbox_ref(owned_sandbox)
             run.sandbox_binding = SandboxBinding(
-                provider=sandbox.provider,
-                sandbox_id=sandbox.sandbox_id,
+                provider=owned_sandbox.provider,
+                sandbox_id=owned_sandbox.sandbox_id,
                 sandbox_ref=run.sandbox_ref,
             )
 
-        self.store.save_run(run)
+        try:
+            self.store.save_run(run)
+        except Exception:
+            if owned_sandbox is not None:
+                self._best_effort_terminate(owned_sandbox)
+                self._sandboxes.pop(run_id, None)
+            raise
         return run
 
     def request_approval(
