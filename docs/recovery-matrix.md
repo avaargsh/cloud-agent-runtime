@@ -41,5 +41,17 @@ providers or scale features.
 
 - exercise the same matrix against the Kubernetes sandbox provider
 - add a PostgreSQL store adapter and rerun store-boundary failure injection
-- emit recovery operation identity/provenance into OTel/evidence records
+- [x] emit recovery operation identity/provenance into OTel/evidence records
 - prove Temporal duplicate/terminal attach semantics in the live Golden Stack
+
+
+## Recovery evidence attributes
+
+Recovery spans that cross a retry/rebind boundary use stable semantic attributes:
+
+- `agent.operation.id`: identity of the current remote mutation attempt
+- `agent.retry.key`: caller-visible idempotency/rebind key
+- `agent.recovery.original_operation_id`: operation identity being recovered or superseded
+- `agent.recovery.reason`: machine-readable recovery cause
+
+The OTel evidence projection promotes these fields into the immutable EvidenceEvent payload so recovery provenance is explicit during audit/replay instead of being hidden only inside arbitrary span attributes.
