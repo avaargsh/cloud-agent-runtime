@@ -92,3 +92,61 @@ def test_otel_projection_rejects_noncanonical_digests(
             span,
             provenance=PROVENANCE,
         )
+
+def test_otel_projection_binds_recovery_operation_and_retry_provenance() -> None:
+    span = OTelSpanSnapshot(
+        trace_id="a" * 32,
+        span_id="b" * 16,
+        name="sandbox.rebind",
+        status="OK",
+        attributes={
+            "agent.run_id": "run-001",
+            "agent.evidence.event_type": "runtime.recovery",
+            "agent.operation.id": "op-rebind-002",
+            "agent.retry.key": "recovery-attempt-42",
+            "agent.recovery.original_operation_id": "op-rebind-001",
+            "agent.recovery.reason": "cleanup-ack-lost",
+        },
+    )
+
+    event = OTelEvidenceAdapter().to_event(
+        span,
+        provenance=PROVENANCE,
+    )
+
+    assert event.event_type == "runtime.recovery"
+    assert event.payload["operation_id"] == "op-rebind-002"
+    assert event.payload["retry_key"] == "recovery-attempt-42"
+    assert event.payload["original_operation_id"] == "op-rebind-001"
+    assert event.payload["recovery_reason"] == "cleanup-ack-lost"
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    [
+        "agent.operation.id",
+        "agent.retry.key",
+        "agent.recovery.original_operation_id",
+        "agent.recovery.reason",
+    ],
+)
+def test_otel_projection_rejects_empty_recovery_identity(attribute) -> None:
+    span = OTelSpanSnapshot(
+        trace_id="a" * 32,
+        span_id="b" * 16,
+        name="runtime.recovery",
+        attributes={
+            "agent.run_id": "run-001",
+            attribute: "",
+        },
+    )
+
+    with pytest.raises(
+        OTelEvidenceError,
+        match=attribute.replace(".", r"\."),
+    ):
+        OTelEvidenceAdapter().to_event(
+            span,
+            provenance=PROVENANCE,
+        )
+
