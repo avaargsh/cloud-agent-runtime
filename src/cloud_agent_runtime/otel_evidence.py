@@ -33,6 +33,20 @@ def _validate_digest(value: Any, *, attribute: str) -> str:
     return value
 
 
+def _optional_nonempty_string(
+    attributes: Mapping[str, Any],
+    name: str,
+) -> str | None:
+    value = attributes.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise OTelEvidenceError(
+            f"{name} must be a non-empty string when present"
+        )
+    return value
+
+
 class OTelEvidenceAdapter:
     """Project an exported OTel span into an execution EvidenceEvent.
 
@@ -75,6 +89,22 @@ class OTelEvidenceAdapter:
         action_id = attributes.get("agent.action_id")
         policy_digest = attributes.get("agent.policy.digest")
         artifact_digest = attributes.get("agent.artifact.digest")
+        operation_id = _optional_nonempty_string(
+            attributes,
+            "agent.operation.id",
+        )
+        retry_key = _optional_nonempty_string(
+            attributes,
+            "agent.retry.key",
+        )
+        original_operation_id = _optional_nonempty_string(
+            attributes,
+            "agent.recovery.original_operation_id",
+        )
+        recovery_reason = _optional_nonempty_string(
+            attributes,
+            "agent.recovery.reason",
+        )
 
         payload: dict[str, Any] = {
             "trace_id": trace_id,
@@ -85,6 +115,14 @@ class OTelEvidenceAdapter:
         }
         if action_id is not None:
             payload["action_id"] = action_id
+        if operation_id is not None:
+            payload["operation_id"] = operation_id
+        if retry_key is not None:
+            payload["retry_key"] = retry_key
+        if original_operation_id is not None:
+            payload["original_operation_id"] = original_operation_id
+        if recovery_reason is not None:
+            payload["recovery_reason"] = recovery_reason
         if policy_digest is not None:
             payload["policy_digest"] = _validate_digest(
                 policy_digest,
