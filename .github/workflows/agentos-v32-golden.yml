@@ -2,16 +2,15 @@ name: agentos-v32-golden
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - "src/cloud_agent_runtime/**"
-      - "scripts/kind-temporal-evidence-golden.py"
-      - ".github/workflows/agentos-v32-golden.yml"
   pull_request:
     paths:
       - "src/cloud_agent_runtime/**"
       - "scripts/kind-temporal-evidence-golden.py"
       - ".github/workflows/agentos-v32-golden.yml"
+
+concurrency:
+  group: agentos-v32-golden-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   golden-slice:
