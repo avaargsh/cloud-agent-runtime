@@ -27,6 +27,43 @@ The reference executor uses:
 A lost ACK after a committed write is therefore resolved by read-after-write
 verification before another mutation is issued.
 
+
+### Opt-in verified-outcome gate
+
+The legacy \`verification_mode="read-after-write"\` remains unchanged for
+compatibility: it uses a read callback to reconcile an ambiguous ACK.
+
+A side-effecting operation can instead select
+\`verification_mode="verified-outcome"\`, provide an immutable, scoped
+\`expected_target_ref\` (including resource UID/generation where relevant), and
+supply a **read-only independent** verifier. This stricter path:
+
+1. derives a stable operation key from the Run and Action;
+2. calls the side-effect provider once;
+3. calls the observer even when the provider returns a successful ACK;
+4. accepts only a typed \`VerifiedToolOutcome\` with exact operation key and
+   target reference, \`status="succeeded"\` and a nonempty evidence reference;
+5. returns a \`ToolExecutionReceipt.verification_ref\` for downstream audit.
+
+If the provider ACK is lost, verification may close the operation without
+reinvoking it. If verification is unknown, negative, mismatched or unavailable,
+the call **fails closed**; the caller must reconcile the original operation
+before it may claim success. No blind mutation retry is attempted in this mode,
+regardless of \`max_attempts\`.
+
+The typed outcome is **not** a cryptographic proof or an authorization grant.
+A production observer must validate the authoritative external state and the
+trusted proof channel (for example, the frozen ACP independent proof plus
+out-of-band digest/signing policy), bind principal/policy/operation/target
+identities, and reject stale evidence. A caller that simply echoes a provider
+ACK into \`VerifiedToolOutcome\` does not satisfy this trust requirement.
+
+The change does not itself mark canonical Run/Temporal workflows complete,
+revoke credentials, enforce cross-tenant policy, or claim live Kubernetes
+acceptance. Focused tests use a synthetic observer to falsify the contract;
+production integration remains an explicit cross-repository acceptance gate.
+
+
 ## External evidence collector
 
 Evidence is collected outside the harness. Each record carries provenance roles
