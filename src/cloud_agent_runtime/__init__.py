@@ -48,6 +48,8 @@ from .tool_contract import (
     ToolContract,
     ToolContractViolation,
     ToolExecutionReceipt,
+    UnverifiedToolOutcome,
+    VerifiedToolOutcome,
     execute_tool,
 )
 from .workflow import InMemoryWorkflowDriver, WorkflowRef
@@ -98,6 +100,8 @@ __all__ = [
     "ToolContract",
     "ToolContractViolation",
     "ToolExecutionReceipt",
+    "UnverifiedToolOutcome",
+    "VerifiedToolOutcome",
     "WorkflowRef",
     "execute_tool",
 ]
