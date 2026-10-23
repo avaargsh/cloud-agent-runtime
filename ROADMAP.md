@@ -1,49 +1,49 @@
 # Roadmap
 
 ## v0.1 — State contracts
-- [x] Session model
-- [x] Run model
-- [x] provider/state references
-- [x] minimal local lifecycle
+- [x] Session and Run models
+- [x] Provider/state references
+- [x] Minimal local lifecycle
 - [x] ArtifactRef / EvidenceRef types
-- [x] approval / budget model
-- [x] capability binding model
-- [x] workflow reference contract
+- [x] Approval / budget model
+- [x] Capability binding model
+- [x] Workflow reference contract
 
 ## v0.2 — Local runtime
 - [x] SQLite reference store
 - [ ] PostgreSQL store adapter
-- [x] local filesystem artifact store
-- [ ] S3-compatible object-store adapter
-- [x] sandbox provider interface
-- [x] in-memory sandbox allocate/bind/snapshot/resume
-- [ ] harness provider interface
-- [x] capability binding contract
-- [ ] OpenTelemetry traces
+- [x] Local filesystem artifact store
+- [ ] Production-grade S3-compatible storage and retention enforcement
+- [x] Sandbox provider interface
+- [x] In-memory sandbox allocate/bind/snapshot/resume
+- [ ] Harness provider interface
+- [ ] Production OTel collector/export configuration
 
 ## v0.3 — Durable workflow
-- [x] async runtime path
+- [x] Async runtime path
 - [x] Temporal Python client adapter
-- [x] deterministic Temporal Workflow ID from canonical Run ID
-- [x] WorkflowAlreadyStarted attach/reuse semantics
-- [x] approval resolution signal
-- [x] approval signal deduplication by approval_id
-- [x] provider-neutral sync/async workflow contracts
-- [x] run pause / resume
-- [x] retry / idempotency policy baseline
-- [x] approval wait states
-- [x] sandbox snapshot / resume
-- [x] Temporal Worker reference workflow
-- [x] stable AgentRunWorkflow name
-- [x] approval / pause / resume / complete / fail signals
-- [x] run_state query
-- [x] worker CLI
-- [x] Temporal test environment integration
-- [x] Worker + Signal + Query + Result integration test
+- [x] Deterministic Temporal Workflow ID from canonical Run ID
+- [x] WorkflowAlreadyStarted attach/reuse baseline
+- [x] Approval resolution signal and deduplication baseline
+- [x] Provider-neutral sync/async workflow contracts
+- [x] Run pause / resume
+- [x] Retry / idempotency baseline
+- [x] Approval wait states
+- [x] Sandbox snapshot / resume contracts
+- [x] Temporal Worker reference workflow and CLI
+- [x] Signals and run_state query
+- [x] Temporal test-environment integration
+- [ ] Complete exact-SHA recovery acceptance matrix across process/worker restart and ambiguous provider ACK
+- [ ] Live provider acceptance for side-effect idempotency and cleanup reconciliation
 
-## v0.4 — Kubernetes scale
-- [ ] warm sandbox pool
-- [ ] tenant quota
-- [ ] Kueue / Volcano integration
-- [ ] GPU / DRA bindings
-- [ ] self-hosted vLLM / SGLang model provider
+## v0.4 — Security and Kubernetes scale
+- [ ] Production authoritative credential/approval service and revocation fan-out
+- [ ] Production-enforced sandbox network isolation and workspace destruction acceptance
+- [ ] Warm sandbox pool
+- [ ] Tenant quota and SLO controls
+- [ ] Kueue / Volcano / GPU / DRA integration through public compute contracts
+- [ ] Self-hosted vLLM / SGLang model provider
+
+## Governance
+
+The project is a lifecycle-binding layer. Temporal owns durable orchestration; the GPU compute platform owns capacity admission, allocation and release; the harness executes bounded attempts. Do not fold those responsibilities into a new runtime abstraction without evidence that an existing interface cannot satisfy the requirement. Track implementation status separately from contract proposals and production acceptance.
