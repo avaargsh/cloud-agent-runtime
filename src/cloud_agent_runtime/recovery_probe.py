@@ -74,6 +74,39 @@ async def _crash_after_accepted_start(args) -> None:
     raise AssertionError("expected crash-after-accepted-start driver to SIGKILL")
 
 
+async def _start_awaiting_ack(args) -> None:
+    """Persist a canonical Run, then block on a proxied StartWorkflow ACK.
+
+    The parent process owns the TCP response-drop proxy and SIGKILLs this
+    process after independently observing the accepted Temporal Workflow.
+    """
+    store = SQLiteStore(args.sqlite_path)
+    driver = await TemporalWorkflowDriver.connect(
+        args.temporal_address,
+        task_queue=args.task_queue,
+        namespace=args.namespace,
+    )
+    runtime = AsyncAgentRuntime(
+        store=store,
+        sandbox_provider=None,
+        workflow_driver=driver,
+    )
+    session = runtime.create_session(
+        agent_id="p0-real-ack-drop-probe",
+        release_id="p0-real-ack-drop-probe-v1",
+        tenant_id="p0-real-ack-drop-test",
+    )
+    # Explicit caller identity is known before the first request. The
+    # external sandbox reference prevents this fault test from accidentally
+    # testing the process-local in-memory sandbox provider.
+    await runtime.start_run(
+        session_id=session.session_id,
+        sandbox_ref=f"sandbox://ack-drop/{args.run_id}",
+        run_id=args.run_id,
+    )
+    raise RuntimeError("unexpectedly received the StartWorkflow acknowledgement")
+
+
 async def _reconcile_sqlite(args) -> None:
     store = SQLiteStore(args.sqlite_path)
     driver = await TemporalWorkflowDriver.connect(
@@ -272,6 +305,7 @@ def main() -> None:
             "start-intent",
             "reconcile",
             "crash-after-accepted-start",
+            "start-await-ack",
             "reconcile-sqlite",
         ],
     )
@@ -299,6 +333,10 @@ def main() -> None:
         parser.error("--sqlite-path is required for process-recovery commands")
     if args.command == "crash-after-accepted-start":
         asyncio.run(_crash_after_accepted_start(args))
+    elif args.command == "start-await-ack":
+        if not args.run_id.strip():
+            parser.error("start-await-ack requires --run-id")
+        asyncio.run(_start_awaiting_ack(args))
     else:
         if not args.run_id.strip():
             parser.error("reconcile-sqlite requires --run-id")
