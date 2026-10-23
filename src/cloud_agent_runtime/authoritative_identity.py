@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
-from temporalio.workflow import unsafe
+from temporalio.workflow import imports_passed_through
 
-with unsafe.imports_passed_through():
+with imports_passed_through():
     from urllib.request import (
         HTTPRedirectHandler,
         HTTPSHandler,
@@ -81,7 +81,6 @@ class WorkloadAssertionIssuer(Protocol):
         ...
 
 
-@unsafe.imports_passed_through()
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # Prevent forwarding service bearer tokens to redirect targets.
