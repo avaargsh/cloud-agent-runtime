@@ -129,7 +129,7 @@ def test_terminate_is_orphan_cleanup_safe():
     ]
     namespace_deletes = [
         args for args, _ in kubectl.calls
-        if args[:2] == ["delete", "namespace"]
+        if args[:2] == ("delete", "namespace")
     ]
     # The second call detects the missing namespace and exits without trying
     # to mutate namespaced resources that no longer exist.
@@ -178,7 +178,7 @@ def test_sandbox_manifest_is_non_root_ephemeral_and_network_is_deny_all():
 
     namespace_labels = [
         args for args, _ in kubectl.calls
-        if args[:2] == ["label", "namespace"]
+        if args[:2] == ("label", "namespace")
     ]
     assert namespace_labels
     assert any(
