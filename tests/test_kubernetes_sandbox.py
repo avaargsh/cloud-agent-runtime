@@ -36,9 +36,9 @@ class FakeKubectl:
             name = manifest["metadata"]["name"]
             namespace = manifest["metadata"]["namespace"]
             if manifest["kind"] == "Pod":
-                self.pods[name] = namespace
+                self.pods[(namespace, name)] = namespace
             elif manifest["kind"] == "NetworkPolicy":
-                self.network_policies[name] = namespace
+                self.network_policies[(namespace, name)] = namespace
             else:
                 return KubectlResult(1, "", "unexpected manifest kind")
             return KubectlResult(0, "", "")
@@ -53,10 +53,10 @@ class FakeKubectl:
             namespace = args[2]
             self.namespaces.discard(namespace)
             self.pods = {
-                name: ns for name, ns in self.pods.items() if ns != namespace
+                key: ns for key, ns in self.pods.items() if ns != namespace
             }
             self.network_policies = {
-                name: ns for name, ns in self.network_policies.items()
+                key: ns for key, ns in self.network_policies.items()
                 if ns != namespace
             }
             return KubectlResult(0, "", "")
@@ -65,9 +65,9 @@ class FakeKubectl:
             name = args[args.index(kind) + 1]
             namespace = args[args.index("-n") + 1]
             if kind == "pod":
-                self.pods.pop(name, None)
+                self.pods.pop((namespace, name), None)
             elif kind == "networkpolicy":
-                self.network_policies.pop(name, None)
+                self.network_policies.pop((namespace, name), None)
             return KubectlResult(0, "", "")
         return KubectlResult(1, "", "unexpected kubectl call")
 
@@ -203,10 +203,13 @@ def test_sandboxes_receive_distinct_namespaces_and_deny_policies():
     assert first_pod["metadata"]["namespace"] in kubectl.namespaces
     assert second_pod["metadata"]["namespace"] in kubectl.namespaces
     assert len(kubectl.network_policies) == 2
-    assert {
-        policy["spec"]["podSelector"]
-        for policy in kubectl.manifests if policy["kind"] == "NetworkPolicy"
-    } == {}
+    policies = [
+        policy for policy in kubectl.manifests
+        if policy["kind"] == "NetworkPolicy"
+    ]
+    assert len(policies) == 2
+    assert all(policy["spec"]["podSelector"] == {} for policy in policies)
+    assert len({policy["metadata"]["namespace"] for policy in policies}) == 2
 
 
 def test_policy_creation_failure_blocks_pod_allocation():
