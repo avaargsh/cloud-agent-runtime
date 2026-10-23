@@ -259,6 +259,7 @@ def _identity_payload(identity: WorkloadIdentity) -> dict[str, Any]:
         "session_id": identity.session_id,
         "run_id": identity.run_id,
         "sandbox_id": identity.sandbox_id,
+        "sandbox_revision": identity.sandbox_revision,
         "workspace_ref": identity.workspace_ref,
         "binding_id": identity.binding_id,
         "capability": identity.capability,
