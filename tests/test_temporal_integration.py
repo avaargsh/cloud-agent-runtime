@@ -386,22 +386,42 @@ def test_temporal_deadline_survives_worker_restart_and_replay() -> None:
 
 
 
-def test_temporal_worker_process_sigkill_restarts_same_workflow_identity() -> None:
+def test_temporal_worker_process_sigkill_restarts_same_workflow_identity(tmp_path) -> None:
     """Kill the OS Worker process, append history while it is absent, and replay."""
     if os.name != "posix":
         import pytest
         pytest.skip("the process-level SIGKILL experiment requires POSIX")
 
-    async def wait_for_state(handle, predicate, *, timeout_seconds=30.0):
+    def log_tail(path: Path) -> str:
+        try:
+            return path.read_text(encoding="utf-8", errors="replace")[-5000:]
+        except OSError:
+            return "<worker log not available>"
+
+    async def wait_for_state(
+        handle,
+        predicate,
+        *,
+        timeout_seconds=30.0,
+        worker=None,
+        log_path: Path | None = None,
+    ):
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_seconds
         last_error = None
+        last_state = None
         while loop.time() < deadline:
+            if worker is not None and worker.poll() is not None:
+                raise AssertionError(
+                    f"worker process exited unexpectedly with code {worker.returncode}; "
+                    f"log={log_tail(log_path) if log_path else '<no log>'}"
+                )
             try:
                 state = await asyncio.wait_for(
                     handle.query(AgentRunWorkflow.run_state),
                     timeout=2.0,
                 )
+                last_state = state
                 if predicate(state):
                     return state
             except Exception as exc:
@@ -409,10 +429,18 @@ def test_temporal_worker_process_sigkill_restarts_same_workflow_identity() -> No
             await asyncio.sleep(0.1)
         raise AssertionError(
             f"workflow did not reach expected state before timeout; "
-            f"last query error={last_error!r}"
+            f"last state={last_state!r}; last query error={last_error!r}; "
+            f"worker poll={worker.poll() if worker is not None else None}; "
+            f"log={log_tail(log_path) if log_path else '<no log>'}"
         )
 
-    def spawn_worker(target: str, task_queue: str, repository_root: Path):
+    def spawn_worker(
+        target: str,
+        task_queue: str,
+        repository_root: Path,
+        log_path: Path,
+        log_handles: list,
+    ):
         worker_env = os.environ.copy()
         source_root = str(repository_root / "src")
         existing_pythonpath = worker_env.get("PYTHONPATH")
@@ -422,6 +450,8 @@ def test_temporal_worker_process_sigkill_restarts_same_workflow_identity() -> No
             else source_root + os.pathsep + existing_pythonpath
         )
         worker_env["PYTHONUNBUFFERED"] = "1"
+        log_handle = log_path.open("wb")
+        log_handles.append(log_handle)
         return subprocess.Popen(
             [
                 sys.executable,
@@ -437,8 +467,8 @@ def test_temporal_worker_process_sigkill_restarts_same_workflow_identity() -> No
             cwd=repository_root,
             env=worker_env,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
         )
 
     async def scenario() -> None:
@@ -456,10 +486,15 @@ def test_temporal_worker_process_sigkill_restarts_same_workflow_identity() -> No
             target = env.client.service_client.config.target_host
             repository_root = Path(__file__).resolve().parents[1]
             workers: list[subprocess.Popen] = []
+            worker_log_handles = []
+            worker_a_log = tmp_path / "temporal-worker-a.log"
+            worker_b_log = tmp_path / "temporal-worker-b.log"
             handle = None
             first_execution_run_id = None
             try:
-                worker_a = spawn_worker(target, task_queue, repository_root)
+                worker_a = spawn_worker(
+                    target, task_queue, repository_root, worker_a_log, worker_log_handles
+                )
                 workers.append(worker_a)
                 handle = await env.client.start_workflow(
                     AgentRunWorkflow.run,
@@ -474,6 +509,8 @@ def test_temporal_worker_process_sigkill_restarts_same_workflow_identity() -> No
                 waiting = await wait_for_state(
                     handle,
                     lambda state: state.get("phase") == "waiting",
+                    worker=worker_a,
+                    log_path=worker_a_log,
                 )
                 assert worker_a.poll() is None
                 assert waiting["runtime_run_id"] == runtime_run_id
@@ -497,7 +534,9 @@ def test_temporal_worker_process_sigkill_restarts_same_workflow_identity() -> No
                         },
                     )
 
-                worker_b = spawn_worker(target, task_queue, repository_root)
+                worker_b = spawn_worker(
+                    target, task_queue, repository_root, worker_b_log, worker_log_handles
+                )
                 workers.append(worker_b)
                 replayed = await wait_for_state(
                     handle,
@@ -505,6 +544,8 @@ def test_temporal_worker_process_sigkill_restarts_same_workflow_identity() -> No
                         state.get("phase") == "running"
                         and len(state.get("approval_events", [])) == 1
                     ),
+                    worker=worker_b,
+                    log_path=worker_b_log,
                 )
                 assert worker_b.poll() is None
                 assert handle.id == workflow_id
@@ -549,5 +590,7 @@ def test_temporal_worker_process_sigkill_restarts_same_workflow_identity() -> No
                     if worker.poll() is None:
                         worker.kill()
                         await asyncio.to_thread(worker.wait, timeout=10)
+                for log_handle in worker_log_handles:
+                    log_handle.close()
 
     asyncio.run(scenario())
