@@ -5,6 +5,7 @@ import pytest
 from cloud_agent_runtime import (
     ApprovalStatus,
     AsyncAgentRuntime,
+    Budget,
     InMemoryAsyncWorkflowDriver,
     InMemorySandboxProvider,
     RunStatus,
@@ -257,6 +258,32 @@ def test_async_approval_resolution_retry_redelivers_same_signal() -> None:
             "actor": "operator@example",
             "reason": "approved after review",
             "evidence_refs": ["evidence://approval/input"],
+        }
+
+    asyncio.run(scenario())
+
+
+
+def test_async_runtime_propagates_wall_clock_budget_to_workflow():
+    async def scenario():
+        driver = InMemoryAsyncWorkflowDriver()
+        runtime = AsyncAgentRuntime(workflow_driver=driver)
+        session = runtime.create_session(
+            agent_id="sre-agent",
+            release_id="release-v1",
+            tenant_id="tenant-a",
+        )
+
+        run = await runtime.start_run(
+            session_id=session.session_id,
+            budget=Budget(max_wall_seconds=23),
+        )
+
+        assert run.budget.max_wall_seconds == 23
+        assert driver.started[-1] == {
+            "runtime_run_id": run.run_id,
+            "session_id": session.session_id,
+            "timeout_seconds": 23.0,
         }
 
     asyncio.run(scenario())
