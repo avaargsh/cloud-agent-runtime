@@ -38,6 +38,34 @@ class AgentRuntime:
         self._sandboxes: dict[str, Sandbox] = {}
 
     @staticmethod
+    def _transition_run(
+        run: Run,
+        *,
+        to_status: RunStatus,
+        event_type: str,
+        event_id: str | None = None,
+        evidence_refs: list[str] | None = None,
+    ) -> None:
+        """Append a durable, Run-scoped audit record before changing status."""
+        if run.status == to_status:
+            return
+        sequence = len(run.transition_events) + 1
+        run.transition_events.append(
+            {
+                "transition_id": f"{run.run_id}:transition:{sequence}",
+                "run_id": run.run_id,
+                "session_id": run.session_id,
+                "sequence": sequence,
+                "event_type": event_type,
+                "event_id": event_id,
+                "from_status": run.status.value,
+                "to_status": to_status.value,
+                "evidence_refs": list(evidence_refs or []),
+            }
+        )
+        run.status = to_status
+
+    @staticmethod
     def _sandbox_ref(sandbox: Sandbox) -> str:
         return f"sandbox://{sandbox.provider}/{sandbox.sandbox_id}"
 
@@ -296,11 +324,17 @@ class AgentRuntime:
         run = Run(
             run_id=run_id,
             session_id=session_id,
-            status=RunStatus.RUNNING,
+            status=RunStatus.CREATED,
             sandbox_ref=resolved_sandbox_ref,
             sandbox_binding=sandbox_binding,
             workflow_ref=None,
             budget=budget,
+        )
+
+        self._transition_run(
+            run,
+            to_status=RunStatus.RUNNING,
+            event_type="run_started",
         )
 
         if owned_sandbox is not None:
@@ -325,7 +359,11 @@ class AgentRuntime:
                 session_id=session_id,
             )
         except Exception:
-            run.status = RunStatus.FAILED
+            self._transition_run(
+                run,
+                to_status=RunStatus.FAILED,
+                event_type="workflow_start_failed",
+            )
             self._best_effort_save_failed_run(run)
             if owned_sandbox is not None:
                 self._best_effort_terminate(owned_sandbox)
@@ -339,7 +377,11 @@ class AgentRuntime:
             terminated = self._best_effort_terminate_workflow(
                 workflow_ref
             )
-            run.status = RunStatus.FAILED
+            self._transition_run(
+                run,
+                to_status=RunStatus.FAILED,
+                event_type="workflow_binding_persistence_failed",
+            )
             if terminated:
                 run.workflow_ref = None
             self._best_effort_save_failed_run(run)
@@ -367,7 +409,13 @@ class AgentRuntime:
             evidence_refs=tuple(evidence_refs or ()),
         )
         run.approvals.append(approval)
-        run.status = RunStatus.WAITING_APPROVAL
+        self._transition_run(
+            run,
+            to_status=RunStatus.WAITING_APPROVAL,
+            event_type="approval_requested",
+            event_id=approval.approval_id,
+            evidence_refs=list(approval.evidence_refs),
+        )
         self.store.save_run(run)
         return approval
 
@@ -403,10 +451,16 @@ class AgentRuntime:
             approval.status = target_status
             approval.actor = actor
             approval.reason = reason
-            run.status = (
-                RunStatus.RUNNING
-                if approved
-                else RunStatus.FAILED
+            self._transition_run(
+                run,
+                to_status=(
+                    RunStatus.RUNNING
+                    if approved
+                    else RunStatus.FAILED
+                ),
+                event_type="approval_approved" if approved else "approval_denied",
+                event_id=approval_id,
+                evidence_refs=list(approval.evidence_refs),
             )
             # Approval resolution is durable before the external signal.
             self.store.save_run(run)
@@ -471,11 +525,17 @@ class AgentRuntime:
                     binding.snapshot_ref = sandbox.snapshot_ref
                     run.sandbox_binding = binding
 
-        run.status = RunStatus.PAUSED
+        original_transition_events = list(run.transition_events)
+        self._transition_run(
+            run,
+            to_status=RunStatus.PAUSED,
+            event_type="run_paused",
+        )
         try:
             self.store.save_run(run)
         except Exception:
             run.status = RunStatus.RUNNING
+            run.transition_events = original_transition_events
             run.sandbox_snapshot_ref = original_snapshot_ref
             if run.sandbox_binding is not None:
                 run.sandbox_binding.snapshot_ref = (
@@ -503,7 +563,12 @@ class AgentRuntime:
                 session_id=run.session_id,
             )
             previous_status = run.status
-            run.status = RunStatus.RUNNING
+            original_transition_events = list(run.transition_events)
+            self._transition_run(
+                run,
+                to_status=RunStatus.RUNNING,
+                event_type="run_resumed",
+            )
             try:
                 return self._replace_sandbox(
                     run,
@@ -513,9 +578,14 @@ class AgentRuntime:
                 )
             except Exception:
                 run.status = previous_status
+                run.transition_events = original_transition_events
                 raise
 
-        run.status = RunStatus.RUNNING
+        self._transition_run(
+            run,
+            to_status=RunStatus.RUNNING,
+            event_type="run_resumed",
+        )
         self.store.save_run(run)
         return run
 
@@ -599,7 +669,12 @@ class AgentRuntime:
         if run.status != RunStatus.RUNNING:
             raise ValueError("only running runs can complete")
 
-        run.status = RunStatus.SUCCEEDED
+        self._transition_run(
+            run,
+            to_status=RunStatus.SUCCEEDED,
+            event_type="run_succeeded",
+            evidence_refs=[str(ref) for ref in (evidence_refs or [])],
+        )
         run.artifact_refs.extend(artifact_refs or [])
         run.evidence_refs.extend(evidence_refs or [])
         self.store.save_run(run)
