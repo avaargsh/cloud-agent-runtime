@@ -17,7 +17,7 @@ class FakeKubectl:
         self.calls.append((tuple(args), stdin))
         if args[:2] == ["get", "namespace"]:
             namespace = args[2]
-            exists = namespace in self.namespaces or self.namespace_exists
+            exists = namespace in self.namespaces
             if exists:
                 return KubectlResult(0, f"namespace/{namespace}", "")
             return KubectlResult(1, "", f'Error from server (NotFound): namespaces "{namespace}" not found')
@@ -48,7 +48,8 @@ class FakeKubectl:
                 pod = args[args.index("pod") + 1]
                 self.pods.discard(pod)
             elif "namespace" in args:
-                self.namespaces.discard(args[args.index("namespace") + 1])
+                namespace = args[args.index("namespace") + 1]
+                self.namespaces.discard(namespace)
                 self.namespace_exists = bool(self.namespaces)
                 self.pods.clear()
             elif "networkpolicy" in args:
