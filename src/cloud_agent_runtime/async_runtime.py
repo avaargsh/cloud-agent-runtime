@@ -1,11 +1,17 @@
 from __future__ import annotations
 
-from .async_workflow import AsyncWorkflowDriver
+from .async_workflow import AsyncWorkflowDriver, WorkflowStartOutcomeUnknown
 from .contracts import Approval, ApprovalStatus, Budget
 from .models import Run, RunStatus
 from .runtime import AgentRuntime
 from .sandbox import SandboxProvider
 from .store import RuntimeStore
+from .temporal_driver import deterministic_start_operation_id
+from .workflow import WorkflowRef
+
+
+class RunRecoveryConflict(RuntimeError):
+    """Run cannot be resumed safely because provider outcome is unknown."""
 
 
 class AsyncAgentRuntime(AgentRuntime):
@@ -25,25 +31,39 @@ class AsyncAgentRuntime(AgentRuntime):
         )
         self.async_workflow_driver = workflow_driver
 
-    async def _best_effort_terminate_async_workflow(
-        self,
-        workflow,
-    ) -> bool:
-        terminate = getattr(
-            self.async_workflow_driver,
-            "terminate_run",
-            None,
-        )
+    async def _best_effort_terminate_async_workflow(self, workflow) -> bool:
+        terminate = getattr(self.async_workflow_driver, "terminate_run", None)
         if terminate is None:
             return False
         try:
             await terminate(
                 workflow,
                 reason="runtime binding persistence failed",
+                operation_id=f"cleanup-workflow:{workflow.workflow_id}",
             )
             return True
         except Exception:
             return False
+
+    def _record_recovery(
+        self,
+        run: Run,
+        *,
+        operation_id: str,
+        outcome: str,
+        attempt: int,
+        detail: str,
+    ) -> None:
+        run.recovery_operation_id = operation_id
+        run.recovery_state = outcome
+        run.recovery_attempts = max(run.recovery_attempts, attempt)
+        run.recovery_evidence.append({
+            "operation_id": operation_id,
+            "outcome": outcome,
+            "attempt": str(attempt),
+            "detail": detail,
+        })
+        self.store.save_run(run)
 
     async def start_run(
         self,
@@ -52,55 +72,141 @@ class AsyncAgentRuntime(AgentRuntime):
         sandbox_ref: str | None = None,
         budget: Budget | None = None,
     ) -> Run:
-        # super().start_run persists the canonical Run and Sandbox binding
-        # before this async workflow provider creates an external side effect.
+        if budget is not None:
+            timeout = budget.max_wall_seconds
+            if timeout is not None and (
+                isinstance(timeout, bool)
+                or not isinstance(timeout, int)
+                or timeout <= 0
+            ):
+                raise ValueError("budget.max_wall_seconds must be a positive integer")
+
         run = super().start_run(
             session_id=session_id,
             sandbox_ref=sandbox_ref,
             budget=budget,
         )
+        operation_id = deterministic_start_operation_id(run.run_id)
+        run.recovery_operation_id = operation_id
+        run.recovery_state = "start_pending"
+        run.recovery_attempts = 0
+        run.recovery_evidence.append({
+            "operation_id": operation_id,
+            "outcome": "intent_persisted",
+            "attempt": "0",
+            "detail": f"canonical run persisted before provider start; workflow_id=agent-run-{run.run_id}",
+        })
+        self.store.save_run(run)
+
+        start_kwargs = {
+            "runtime_run_id": run.run_id,
+            "session_id": session_id,
+        }
+        if budget is not None and budget.max_wall_seconds is not None:
+            start_kwargs["timeout_seconds"] = float(budget.max_wall_seconds)
 
         try:
-            workflow_ref = (
-                await self.async_workflow_driver.start_run(
-                    runtime_run_id=run.run_id,
-                    session_id=session_id,
-                )
+            workflow_ref = await self.async_workflow_driver.start_run(**start_kwargs)
+        except WorkflowStartOutcomeUnknown as exc:
+            # Keep Run recoverable and explicitly unknown. Never convert an
+            # ambiguous provider acknowledgement into FAILED or a new identity.
+            self._record_recovery(
+                run,
+                operation_id=operation_id,
+                outcome="unknown",
+                attempt=1,
+                detail=f"provider may have accepted start; workflow_id={exc.workflow_id}; {exc}",
             )
-        except Exception:
-            run.status = RunStatus.FAILED
-            self._best_effort_save_failed_run(run)
-            current = self._sandboxes.pop(
-                run.run_id,
-                None,
+            raise
+        except Exception as exc:
+            # A generic network/provider exception can occur after acceptance;
+            # do not claim a definitive failure without provider reconciliation.
+            self._record_recovery(
+                run,
+                operation_id=operation_id,
+                outcome="unknown",
+                attempt=1,
+                detail=f"start outcome could not be established: {type(exc).__name__}: {exc}",
             )
-            if current is not None:
-                self._best_effort_terminate(current)
             raise
 
         run.workflow_ref = workflow_ref
+        self._record_recovery(
+            run,
+            operation_id=operation_id,
+            outcome="attached",
+            attempt=1,
+            detail=f"provider acknowledged workflow_id={workflow_ref.workflow_id}; provider={workflow_ref.provider}",
+        )
+        return self.store.get_run(run.run_id)
+
+    async def reconcile_run(self, run_id: str) -> Run:
+        """Attach an uncertain canonical Run to its original workflow or stay unknown."""
+        run = self.store.get_run(run_id)
+        operation_id = deterministic_start_operation_id(run.run_id)
+        if run.recovery_operation_id not in (None, operation_id):
+            raise RunRecoveryConflict("persisted start operation does not match canonical Run")
+        if run.workflow_ref is not None and run.recovery_state == "attached":
+            return run
+
+        reconcile = getattr(self.async_workflow_driver, "reconcile_start", None)
+        if reconcile is None:
+            self._record_recovery(
+                run,
+                operation_id=operation_id,
+                outcome="unknown",
+                attempt=run.recovery_attempts + 1,
+                detail="provider does not expose start reconciliation; no new workflow was created",
+            )
+            raise RunRecoveryConflict(
+                f"cannot verify provider workflow state for Run {run_id}; Run remains unknown"
+            )
+
+        timeout_seconds = (
+            float(run.budget.max_wall_seconds)
+            if run.budget is not None and run.budget.max_wall_seconds is not None
+            else None
+        )
         try:
-            self.store.save_run(run)
-        except Exception:
-            terminated = (
-                await self._best_effort_terminate_async_workflow(
-                    workflow_ref
-                )
+            workflow_ref = await reconcile(
+                runtime_run_id=run.run_id,
+                session_id=run.session_id,
+                operation_id=operation_id,
+                timeout_seconds=timeout_seconds,
             )
-            run.status = RunStatus.FAILED
-            if terminated:
-                run.workflow_ref = None
-            self._best_effort_save_failed_run(run)
-
-            current = self._sandboxes.pop(
-                run.run_id,
-                None,
+        except Exception as exc:
+            self._record_recovery(
+                run,
+                operation_id=operation_id,
+                outcome="unknown",
+                attempt=run.recovery_attempts + 1,
+                detail=f"provider reconciliation failed closed: {type(exc).__name__}: {exc}",
             )
-            if current is not None:
-                self._best_effort_terminate(current)
-            raise
+            raise RunRecoveryConflict(
+                f"provider reconciliation failed for Run {run_id}; no duplicate was started"
+            ) from exc
 
-        return run
+        if workflow_ref is None:
+            self._record_recovery(
+                run,
+                operation_id=operation_id,
+                outcome="unknown",
+                attempt=run.recovery_attempts + 1,
+                detail="provider cannot confirm an execution for deterministic workflow identity; no duplicate was started",
+            )
+            raise RunRecoveryConflict(
+                f"provider cannot prove workflow existence or absence for Run {run_id}"
+            )
+
+        run.workflow_ref = workflow_ref
+        self._record_recovery(
+            run,
+            operation_id=operation_id,
+            outcome="attached",
+            attempt=run.recovery_attempts + 1,
+            detail=f"reconciled existing workflow_id={workflow_ref.workflow_id}; provider={workflow_ref.provider}",
+        )
+        return self.store.get_run(run_id)
 
     async def resolve_approval(
         self,
@@ -118,7 +224,6 @@ class AsyncAgentRuntime(AgentRuntime):
             actor=actor,
             reason=reason,
         )
-
         run = self.store.get_run(run_id)
         if run.workflow_ref is not None:
             await self.async_workflow_driver.signal(
@@ -126,16 +231,10 @@ class AsyncAgentRuntime(AgentRuntime):
                 name="approval_resolved",
                 payload={
                     "approval_id": approval_id,
-                    "approved": (
-                        approval.status
-                        == ApprovalStatus.APPROVED
-                    ),
+                    "approved": approval.status == ApprovalStatus.APPROVED,
                     "actor": approval.actor,
                     "reason": approval.reason,
-                    "evidence_refs": list(
-                        approval.evidence_refs
-                    ),
+                    "evidence_refs": list(approval.evidence_refs),
                 },
             )
-
         return approval
