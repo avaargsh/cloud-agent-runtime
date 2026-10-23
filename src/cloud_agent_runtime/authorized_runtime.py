@@ -279,10 +279,9 @@ class AuthorizedAgentRuntime:
         artifact_refs=None,
         evidence_refs=None,
     ) -> Run:
-        self._owned_run(principal, run_id)
-        # Invalidate leases before changing Run state or producing terminal
-        # side effects; a failed completion must not leave old authority alive.
-        self._credential_broker.revoke_run(run_id)
+        run, _ = self._owned_run(principal, run_id)
+        # Fence the exact current sandbox revision before terminal effects.
+        self._revoke_run_revision(run)
         return self._runtime.complete_run(
             run_id,
             artifact_refs=artifact_refs,

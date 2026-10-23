@@ -471,10 +471,15 @@ def test_run_revocation_fences_old_sandbox_assertions_but_allows_new_revision():
         ttl_seconds=20,
     )
     transport.responses[("POST", "/v1/workload-credentials:issue")] = broker_response()
+    transport.responses[("POST", "/v1/workload-credentials:revoke-run")] = {
+        "revoked_count": 1
+    }
     broker.issue(identity(), binding(), request1)
     broker.revoke_run("run-a", sandbox_revision=3)
 
     stale = identity()
+    issue_path = ("POST", "/v1/workload-credentials:issue")
+    transport.errors[issue_path] = IdentityAuthorizationError("sandbox revision fenced")
     with pytest.raises(IdentityAuthorizationError):
         broker.issue(
             stale,
@@ -486,6 +491,7 @@ def test_run_revocation_fences_old_sandbox_assertions_but_allows_new_revision():
                 ttl_seconds=20,
             ),
         )
+    transport.errors.pop(issue_path)
     newer = WorkloadIdentity(
         **{
             **identity_payload(),
