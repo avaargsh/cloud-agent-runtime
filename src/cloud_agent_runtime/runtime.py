@@ -661,7 +661,12 @@ class AgentRuntime:
 
     def _queue_cancel_sandbox_cleanup(self, run: Run) -> bool:
         """Persist cleanup intent for the sandbox bound to a cancelled Run."""
-        binding = self._ensure_binding(run)
+        try:
+            binding = self._ensure_binding(run)
+        except ValueError:
+            # Explicit external sandbox refs are not managed by this provider
+            # contract; they must not prevent the canonical Run from cancelling.
+            return False
         if binding is None or not binding.sandbox_ref:
             return False
         if (
@@ -676,6 +681,13 @@ class AgentRuntime:
 
     def _finish_cancel_sandbox_cleanup(self, run_id: str) -> Run:
         """Retry durable sandbox cleanup and drop terminal Run cache on success."""
+        candidate = self.store.get_run(run_id)
+        try:
+            self._ensure_binding(candidate)
+        except ValueError:
+            # No supported provider binding exists for this external reference.
+            self._sandboxes.pop(run_id, None)
+            return candidate
         run = self.cleanup_retired_sandboxes(run_id)
         binding = run.sandbox_binding
         if run.status == RunStatus.CANCELLED and (
