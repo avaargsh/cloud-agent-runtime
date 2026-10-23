@@ -257,6 +257,16 @@ class AgentRuntime:
                 )
                 self.sandbox_provider.terminate(retired)
                 changed = True
+                if (
+                    run.status == RunStatus.CANCELLED
+                    and ref == binding.sandbox_ref
+                ):
+                    # Commit cleanup completion atomically with removal from the
+                    # pending list. A failed save leaves both pieces unchanged.
+                    run.metadata = {
+                        **dict(run.metadata),
+                        "cancel_cleanup_completed_ref": ref,
+                    }
             except Exception:
                 remaining.append(ref)
 
@@ -693,17 +703,6 @@ class AgentRuntime:
         if run.status == RunStatus.CANCELLED and (
             binding is None or not binding.pending_cleanup_refs
         ):
-            if (
-                binding is not None
-                and binding.sandbox_ref
-                and run.metadata.get("cancel_cleanup_completed_ref")
-                != binding.sandbox_ref
-            ):
-                run.metadata = {
-                    **dict(run.metadata),
-                    "cancel_cleanup_completed_ref": binding.sandbox_ref,
-                }
-                self.store.save_run(run)
             self._sandboxes.pop(run_id, None)
         return run
 
