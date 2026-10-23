@@ -1,4 +1,14 @@
 from .artifact_store import LocalArtifactStore
+from .canonical_runtime_identity import (
+    CANONICAL_RUN_CONTRACT_VERSION,
+    CanonicalRuntimeRunBinding,
+    HttpsRuntimeStoreRunAuthorityReader,
+    RuntimeCanonicalIdentityWSGI,
+    RuntimeIdentityNotFoundError,
+    RuntimeIdentityProtocolError,
+    RuntimeIdentityUnavailableError,
+    RuntimeStoreRunAuthorityReader,
+)
 from .async_runtime import AsyncAgentRuntime
 from .async_workflow import (
     AsyncWorkflowDriver,
@@ -55,6 +65,14 @@ from .tool_contract import (
 from .workflow import InMemoryWorkflowDriver, WorkflowRef
 
 __all__ = [
+    "CANONICAL_RUN_CONTRACT_VERSION",
+    "CanonicalRuntimeRunBinding",
+    "HttpsRuntimeStoreRunAuthorityReader",
+    "RuntimeCanonicalIdentityWSGI",
+    "RuntimeIdentityNotFoundError",
+    "RuntimeIdentityProtocolError",
+    "RuntimeIdentityUnavailableError",
+    "RuntimeStoreRunAuthorityReader",
     "AgentRuntime",
     "ArchivedEvidence",
     "AppendOnlyEvidenceCollector",
