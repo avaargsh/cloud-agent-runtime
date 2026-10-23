@@ -711,3 +711,592 @@ def test_rebind_replay_recovers_when_cleanup_commit_fails_after_termination():
     original_id = original_ref.rsplit("/", 1)[-1]
     assert provider.terminated_ids.count(original_id) == 2
 
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize(
+    ("identity_field", "replacement"),
+    [
+        ("agent_id", "agent-b"),
+        ("release_id", "release-v2"),
+        ("tenant_id", "tenant-b"),
+    ],
+)
+def test_session_identity_cannot_be_rebound(
+    store_kind, identity_field, replacement, tmp_path
+):
+    from cloud_agent_runtime.models import Session
+
+    store = (
+        InMemoryStore()
+        if store_kind == "memory"
+        else SQLiteStore(tmp_path / "session-identity.db")
+    )
+    original_values = {
+        "session_id": "stable-session",
+        "agent_id": "agent-a",
+        "release_id": "release-v1",
+        "tenant_id": "tenant-a",
+    }
+    store.save_session(Session(**original_values))
+
+    conflicting_values = {
+        **original_values,
+        identity_field: replacement,
+    }
+    with pytest.raises(ValueError, match="session identity is immutable"):
+        store.save_session(Session(**conflicting_values))
+
+    persisted = store.get_session("stable-session")
+    assert persisted.agent_id == original_values["agent_id"]
+    assert persisted.release_id == original_values["release_id"]
+    assert persisted.tenant_id == original_values["tenant_id"]
+    if isinstance(store, SQLiteStore):
+        store.close()
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
+def test_run_identity_cannot_be_rebound_to_another_session(store_kind, tmp_path):
+    from cloud_agent_runtime.models import Run
+
+    store = (
+        InMemoryStore()
+        if store_kind == "memory"
+        else SQLiteStore(tmp_path / "run-identity.db")
+    )
+    store.save_run(Run(run_id="stable-run", session_id="session-a"))
+
+    with pytest.raises(ValueError, match="run identity is immutable"):
+        store.save_run(Run(run_id="stable-run", session_id="session-b"))
+
+    assert store.get_run("stable-run").session_id == "session-a"
+    if isinstance(store, SQLiteStore):
+        store.close()
+
+class RecordingWorkflowDriver(InMemoryWorkflowDriver):
+    def __init__(self):
+        super().__init__()
+        self.signals = []
+
+    def signal(self, workflow, *, name: str, payload: dict):
+        self.signals.append((workflow.workflow_id, name, dict(payload)))
+
+
+def test_run_transition_audit_survives_sqlite_restart(tmp_path):
+    db = tmp_path / "transition-audit.db"
+    first_store = SQLiteStore(db)
+    runtime = AgentRuntime(
+        store=first_store,
+        workflow_driver=InMemoryWorkflowDriver(),
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+    run_id = run.run_id
+
+    completed = runtime.complete_run(
+        run_id,
+        evidence_refs=["evidence://run/complete"],
+    )
+    assert [
+        (event["from_status"], event["to_status"])
+        for event in completed.transition_events
+    ] == [
+        ("created", "running"),
+        ("running", "succeeded"),
+    ]
+    first_store.close()
+
+    second_store = SQLiteStore(db)
+    recovered = second_store.get_run(run_id)
+    assert recovered.status.value == "succeeded"
+    assert recovered.transition_events == completed.transition_events
+    assert recovered.transition_events[-1]["evidence_refs"] == [
+        "evidence://run/complete"
+    ]
+    second_store.close()
+
+
+def test_cancel_is_durable_and_retry_resends_same_workflow_signal(tmp_path):
+    db = tmp_path / "cancel-retry.db"
+    store = SQLiteStore(db)
+    workflow = RecordingWorkflowDriver()
+    runtime = AgentRuntime(store=store, workflow_driver=workflow)
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+
+    cancelled = runtime.cancel_run(
+        run.run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-event-1",
+        evidence_refs=["evidence://ops/cancel"],
+    )
+    assert cancelled.status.value == "cancelled"
+    assert len(cancelled.transition_events) == 2
+    assert cancelled.transition_events[-1]["event_id"] == "cancel-event-1"
+    assert workflow.signals[-1][1] == "cancel_run"
+    assert workflow.signals[-1][2]["event_id"] == "cancel-event-1"
+
+    # A repeated request retries delivery without adding a second transition.
+    replay = runtime.cancel_run(
+        run.run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-event-1",
+        evidence_refs=["evidence://ops/cancel"],
+    )
+    assert replay.transition_events == cancelled.transition_events
+    assert [signal[1] for signal in workflow.signals].count("cancel_run") == 2
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("reason", "event_id", "evidence_refs"),
+    [
+        (
+            "different cancellation reason",
+            "cancel-event-1",
+            ["evidence://ops/cancel"],
+        ),
+        (
+            "operator requested cancellation",
+            "different-event",
+            ["evidence://ops/cancel"],
+        ),
+        (
+            "operator requested cancellation",
+            "cancel-event-1",
+            ["evidence://ops/changed"],
+        ),
+    ],
+)
+def test_cancel_retry_rejects_changed_durable_intent(
+    reason, event_id, evidence_refs
+):
+    workflow = RecordingWorkflowDriver()
+    runtime = AgentRuntime(workflow_driver=workflow)
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+    cancelled = runtime.cancel_run(
+        run.run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-event-1",
+        evidence_refs=["evidence://ops/cancel"],
+    )
+    durable_before_retry = runtime.store.get_run(run.run_id)
+    signal_count_before_retry = len(workflow.signals)
+
+    with pytest.raises(
+        ValueError,
+        match="cancellation retry metadata differs from durable request",
+    ):
+        runtime.cancel_run(
+            run.run_id,
+            reason=reason,
+            event_id=event_id,
+            evidence_refs=evidence_refs,
+        )
+
+    durable_after_retry = runtime.store.get_run(run.run_id)
+    assert durable_after_retry.status == cancelled.status
+    assert durable_after_retry.metadata == durable_before_retry.metadata
+    assert durable_after_retry.transition_events == durable_before_retry.transition_events
+    assert durable_after_retry.evidence_refs == durable_before_retry.evidence_refs
+    assert len(workflow.signals) == signal_count_before_retry
+
+
+class FailOnceCancelWorkflowDriver(RecordingWorkflowDriver):
+    def __init__(self):
+        super().__init__()
+        self.fail_cancel_once = True
+
+    def signal(self, workflow, *, name: str, payload: dict):
+        super().signal(workflow, name=name, payload=payload)
+        if name == "cancel_run" and self.fail_cancel_once:
+            self.fail_cancel_once = False
+            raise RuntimeError("simulated workflow signal delivery failure")
+
+
+def test_cancel_signal_failure_recovers_from_durable_intent(tmp_path):
+    db = tmp_path / "cancel-signal-failure.db"
+    store = SQLiteStore(db)
+    workflow = FailOnceCancelWorkflowDriver()
+    runtime = AgentRuntime(store=store, workflow_driver=workflow)
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+
+    with pytest.raises(
+        RuntimeError,
+        match="simulated workflow signal delivery failure",
+    ):
+        runtime.cancel_run(
+            run.run_id,
+            reason="operator requested cancellation",
+            event_id="cancel-event-stable",
+            evidence_refs=["evidence://ops/cancel-stable"],
+        )
+
+    # The durable intent must survive a failed external delivery.
+    persisted = store.get_run(run.run_id)
+    assert persisted.status.value == "cancelled"
+    assert persisted.metadata["terminal_reason"] == "operator requested cancellation"
+    assert persisted.metadata["cancel_event_id"] == "cancel-event-stable"
+    assert persisted.transition_events[-1]["event_id"] == "cancel-event-stable"
+
+    # Reopen the SQLite store to model a runtime process restart.
+    store.close()
+    store = SQLiteStore(db)
+    runtime = AgentRuntime(store=store, workflow_driver=workflow)
+
+    replay = runtime.cancel_run(
+        run.run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-event-stable",
+        evidence_refs=["evidence://ops/cancel-stable"],
+    )
+    assert replay.status.value == "cancelled"
+    assert len(replay.transition_events) == len(persisted.transition_events)
+    assert len(workflow.signals) == 2
+    assert workflow.signals[0][2] == workflow.signals[1][2]
+
+    # A conflicting retry is rejected instead of changing the first request.
+    with pytest.raises(
+        ValueError,
+        match="cancellation retry metadata differs from durable request",
+    ):
+        runtime.cancel_run(
+            run.run_id,
+            reason="different cancellation intent",
+            event_id="cancel-event-conflict",
+            evidence_refs=["evidence://ops/other"],
+        )
+    assert len(workflow.signals) == 2
+    store.close()
+
+
+class FailOnceCountingSandboxProvider(FailOnceTerminateProvider):
+    def __init__(self):
+        super().__init__()
+        self.terminated_ids = []
+
+    def terminate(self, sandbox):
+        self.terminated_ids.append(sandbox.sandbox_id)
+        return super().terminate(sandbox)
+
+
+def test_cancel_cleans_current_sandbox_and_drops_terminal_cache():
+    provider = CountingSandboxProvider()
+    runtime = AgentRuntime(
+        sandbox_provider=provider,
+        workflow_driver=InMemoryWorkflowDriver(),
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+    sandbox_id = run.sandbox_binding.sandbox_id
+
+    cancelled = runtime.cancel_run(
+        run.run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-with-cleanup",
+    )
+
+    assert cancelled.status.value == "cancelled"
+    assert cancelled.sandbox_binding is not None
+    assert cancelled.sandbox_binding.pending_cleanup_refs == []
+    assert provider.terminated_ids.count(sandbox_id) == 1
+    assert run.run_id not in runtime._sandboxes
+
+
+def test_cancel_cleanup_failure_remains_durable_and_retryable():
+    provider = FailOnceCountingSandboxProvider()
+    runtime = AgentRuntime(
+        sandbox_provider=provider,
+        workflow_driver=InMemoryWorkflowDriver(),
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+    sandbox_id = run.sandbox_binding.sandbox_id
+
+    first = runtime.cancel_run(
+        run.run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-cleanup-retry",
+    )
+    assert first.status.value == "cancelled"
+    assert first.sandbox_binding is not None
+    assert first.sandbox_binding.pending_cleanup_refs == [run.sandbox_ref]
+    assert provider.terminated_ids == [sandbox_id]
+
+    replay = runtime.cancel_run(
+        run.run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-cleanup-retry",
+    )
+    assert replay.status.value == "cancelled"
+    assert replay.sandbox_binding is not None
+    assert replay.sandbox_binding.pending_cleanup_refs == []
+    assert provider.terminated_ids == [sandbox_id, sandbox_id]
+    assert run.run_id not in runtime._sandboxes
+
+
+class FailOnceCancelCleanupCommitStore(InMemoryStore):
+    def __init__(self):
+        super().__init__()
+        self.failed = False
+
+    def save_run(self, run):
+        binding = run.sandbox_binding
+        if (
+            not self.failed
+            and run.status.value == "cancelled"
+            and binding is not None
+            and binding.pending_cleanup_refs == []
+        ):
+            self.failed = True
+            raise RuntimeError("simulated cancellation cleanup commit failure")
+        return super().save_run(run)
+
+
+def test_cancel_cleanup_commit_failure_retries_without_reallocating_sandbox():
+    provider = CountingSandboxProvider()
+    store = FailOnceCancelCleanupCommitStore()
+    runtime = AgentRuntime(
+        store=store,
+        sandbox_provider=provider,
+        workflow_driver=InMemoryWorkflowDriver(),
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+    original_ref = run.sandbox_ref
+    original_run_id = run.run_id
+    original_sandbox_id = run.sandbox_binding.sandbox_id
+
+    with pytest.raises(
+        RuntimeError,
+        match="simulated cancellation cleanup commit failure",
+    ):
+        runtime.cancel_run(
+            run.run_id,
+            reason="operator requested cancellation",
+            event_id="cancel-cleanup-commit",
+        )
+
+    persisted = store.get_run(original_run_id)
+    assert persisted.status.value == "cancelled"
+    assert persisted.sandbox_binding.pending_cleanup_refs == [original_ref]
+    assert provider.terminated_ids == [original_sandbox_id]
+    allocations_after_failure = len(provider.allocated_ids)
+
+    recovered = runtime.cancel_run(
+        original_run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-cleanup-commit",
+    )
+    assert recovered.run_id == original_run_id
+    assert recovered.sandbox_ref == original_ref
+    assert recovered.sandbox_binding.pending_cleanup_refs == []
+    assert len(provider.allocated_ids) == allocations_after_failure == 1
+    assert provider.terminated_ids == [original_sandbox_id, original_sandbox_id]
+
+
+def test_cancel_signal_failure_still_cleans_sandbox_once():
+    provider = CountingSandboxProvider()
+    workflow = FailOnceCancelWorkflowDriver()
+    runtime = AgentRuntime(
+        sandbox_provider=provider,
+        workflow_driver=workflow,
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+    sandbox_id = run.sandbox_binding.sandbox_id
+
+    with pytest.raises(
+        RuntimeError,
+        match="simulated workflow signal delivery failure",
+    ):
+        runtime.cancel_run(
+            run.run_id,
+            reason="operator requested cancellation",
+            event_id="cancel-signal-cleanup",
+        )
+
+    persisted = runtime.store.get_run(run.run_id)
+    assert persisted.status.value == "cancelled"
+    assert persisted.sandbox_binding.pending_cleanup_refs == []
+    assert persisted.metadata["cancel_cleanup_completed_ref"] == run.sandbox_ref
+    assert provider.terminated_ids == [sandbox_id]
+
+    # Retry redelivers the same workflow signal but doesn't re-terminate a
+    # sandbox whose successful cleanup was already durably recorded.
+    replay = runtime.cancel_run(
+        run.run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-signal-cleanup",
+    )
+    assert replay.status.value == "cancelled"
+    assert provider.terminated_ids == [sandbox_id]
+
+
+def test_cancel_does_not_fail_for_external_sandbox_reference():
+    runtime = AgentRuntime(workflow_driver=InMemoryWorkflowDriver())
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    external_ref = "external-sandbox://provider/resource-42"
+    run = runtime.start_run(
+        session_id=session.session_id,
+        sandbox_ref=external_ref,
+    )
+
+    cancelled = runtime.cancel_run(
+        run.run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-external-sandbox",
+    )
+
+    assert cancelled.status.value == "cancelled"
+    assert cancelled.sandbox_ref == external_ref
+    assert cancelled.sandbox_binding is None
+
+
+
+class RestartableCleanupBackend:
+    """Shared external provider state, independent of any adapter instance."""
+
+    def __init__(self):
+        self.allocated_ids = []
+        self.terminated_ids = []
+        self.failures_remaining = 1
+
+
+class RestartableCleanupProvider(InMemorySandboxProvider):
+    """New adapter instances act on the same simulated external provider."""
+
+    def __init__(self, backend=None):
+        self.backend = backend if backend is not None else RestartableCleanupBackend()
+
+    @property
+    def allocated_ids(self):
+        return self.backend.allocated_ids
+
+    @property
+    def terminated_ids(self):
+        return self.backend.terminated_ids
+
+    def allocate(self):
+        sandbox = super().allocate()
+        self.backend.allocated_ids.append(sandbox.sandbox_id)
+        return sandbox
+
+    def terminate(self, sandbox):
+        self.backend.terminated_ids.append(sandbox.sandbox_id)
+        if self.backend.failures_remaining:
+            self.backend.failures_remaining -= 1
+            raise RuntimeError("simulated cleanup outage across runtime restart")
+        return super().terminate(sandbox)
+
+
+def test_cleanup_intent_recovers_after_sqlite_and_runtime_restart(tmp_path):
+    db = tmp_path / "cleanup-restart.db"
+    provider = RestartableCleanupProvider()
+
+    first_store = SQLiteStore(db)
+    first_runtime = AgentRuntime(
+        store=first_store,
+        sandbox_provider=provider,
+        workflow_driver=InMemoryWorkflowDriver(),
+    )
+    session = first_runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = first_runtime.start_run(session_id=session.session_id)
+    original_run_id = run.run_id
+    original_session_id = run.session_id
+    original_workflow_ref = run.workflow_ref
+    original_sandbox_ref = run.sandbox_ref
+    original_sandbox_id = run.sandbox_binding.sandbox_id
+
+    cancelled = first_runtime.cancel_run(
+        original_run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-before-runtime-restart",
+    )
+    assert cancelled.status.value == "cancelled"
+    assert cancelled.sandbox_binding.pending_cleanup_refs == [
+        original_sandbox_ref
+    ]
+    assert provider.terminated_ids == [original_sandbox_id]
+    assert len(provider.allocated_ids) == 1
+    first_store.close()
+
+    # Reconstruct the SQLite connection, Runtime, and provider adapter.
+    second_store = SQLiteStore(db)
+    restarted_provider = RestartableCleanupProvider(backend=provider.backend)
+    restarted = AgentRuntime(
+        store=second_store,
+        sandbox_provider=restarted_provider,
+        workflow_driver=InMemoryWorkflowDriver(),
+    )
+    before_retry = second_store.get_run(original_run_id)
+    assert before_retry.run_id == original_run_id
+    assert before_retry.session_id == original_session_id
+    assert before_retry.workflow_ref == original_workflow_ref
+    assert before_retry.sandbox_ref == original_sandbox_ref
+    assert before_retry.status.value == "cancelled"
+    assert before_retry.sandbox_binding.pending_cleanup_refs == [
+        original_sandbox_ref
+    ]
+
+    recovered = restarted.cancel_run(
+        original_run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-before-runtime-restart",
+    )
+    assert recovered.run_id == original_run_id
+    assert recovered.session_id == original_session_id
+    assert recovered.workflow_ref == original_workflow_ref
+    assert recovered.sandbox_ref == original_sandbox_ref
+    assert recovered.status.value == "cancelled"
+    assert recovered.sandbox_binding.pending_cleanup_refs == []
+    assert recovered.metadata["cancel_cleanup_completed_ref"] == original_sandbox_ref
+    assert [
+        (event["from_status"], event["to_status"])
+        for event in recovered.transition_events
+    ] == [("created", "running"), ("running", "cancelled")]
+    assert len(provider.allocated_ids) == 1
+    assert provider.terminated_ids == [original_sandbox_id, original_sandbox_id]
+    second_store.close()

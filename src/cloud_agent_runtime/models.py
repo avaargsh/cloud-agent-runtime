@@ -27,6 +27,7 @@ class RunStatus(str, Enum):
     PAUSED = "paused"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 @dataclass
@@ -69,3 +70,4 @@ class Run:
     approvals: list[Approval] = field(default_factory=list)
     budget: Budget | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
+    transition_events: list[dict[str, object]] = field(default_factory=list)

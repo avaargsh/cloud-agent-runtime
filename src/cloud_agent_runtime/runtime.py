@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from uuid import uuid4
 
 from .contracts import (
@@ -36,6 +37,34 @@ class AgentRuntime:
         self.sandbox_provider = sandbox_provider
         self.workflow_driver = workflow_driver
         self._sandboxes: dict[str, Sandbox] = {}
+
+    @staticmethod
+    def _transition_run(
+        run: Run,
+        *,
+        to_status: RunStatus,
+        event_type: str,
+        event_id: str | None = None,
+        evidence_refs: list[str] | None = None,
+    ) -> None:
+        """Append a durable, Run-scoped audit record before changing status."""
+        if run.status == to_status:
+            return
+        sequence = len(run.transition_events) + 1
+        run.transition_events.append(
+            {
+                "transition_id": f"{run.run_id}:transition:{sequence}",
+                "run_id": run.run_id,
+                "session_id": run.session_id,
+                "sequence": sequence,
+                "event_type": event_type,
+                "event_id": event_id,
+                "from_status": run.status.value,
+                "to_status": to_status.value,
+                "evidence_refs": list(evidence_refs or []),
+            }
+        )
+        run.status = to_status
 
     @staticmethod
     def _sandbox_ref(sandbox: Sandbox) -> str:
@@ -228,6 +257,16 @@ class AgentRuntime:
                 )
                 self.sandbox_provider.terminate(retired)
                 changed = True
+                if (
+                    run.status == RunStatus.CANCELLED
+                    and ref == binding.sandbox_ref
+                ):
+                    # Commit cleanup completion atomically with removal from the
+                    # pending list. A failed save leaves both pieces unchanged.
+                    run.metadata = {
+                        **dict(run.metadata),
+                        "cancel_cleanup_completed_ref": ref,
+                    }
             except Exception:
                 remaining.append(ref)
 
@@ -296,11 +335,17 @@ class AgentRuntime:
         run = Run(
             run_id=run_id,
             session_id=session_id,
-            status=RunStatus.RUNNING,
+            status=RunStatus.CREATED,
             sandbox_ref=resolved_sandbox_ref,
             sandbox_binding=sandbox_binding,
             workflow_ref=None,
             budget=budget,
+        )
+
+        self._transition_run(
+            run,
+            to_status=RunStatus.RUNNING,
+            event_type="run_started",
         )
 
         if owned_sandbox is not None:
@@ -325,7 +370,11 @@ class AgentRuntime:
                 session_id=session_id,
             )
         except Exception:
-            run.status = RunStatus.FAILED
+            self._transition_run(
+                run,
+                to_status=RunStatus.FAILED,
+                event_type="workflow_start_failed",
+            )
             self._best_effort_save_failed_run(run)
             if owned_sandbox is not None:
                 self._best_effort_terminate(owned_sandbox)
@@ -339,7 +388,11 @@ class AgentRuntime:
             terminated = self._best_effort_terminate_workflow(
                 workflow_ref
             )
-            run.status = RunStatus.FAILED
+            self._transition_run(
+                run,
+                to_status=RunStatus.FAILED,
+                event_type="workflow_binding_persistence_failed",
+            )
             if terminated:
                 run.workflow_ref = None
             self._best_effort_save_failed_run(run)
@@ -367,7 +420,13 @@ class AgentRuntime:
             evidence_refs=tuple(evidence_refs or ()),
         )
         run.approvals.append(approval)
-        run.status = RunStatus.WAITING_APPROVAL
+        self._transition_run(
+            run,
+            to_status=RunStatus.WAITING_APPROVAL,
+            event_type="approval_requested",
+            event_id=approval.approval_id,
+            evidence_refs=list(approval.evidence_refs),
+        )
         self.store.save_run(run)
         return approval
 
@@ -403,10 +462,16 @@ class AgentRuntime:
             approval.status = target_status
             approval.actor = actor
             approval.reason = reason
-            run.status = (
-                RunStatus.RUNNING
-                if approved
-                else RunStatus.FAILED
+            self._transition_run(
+                run,
+                to_status=(
+                    RunStatus.RUNNING
+                    if approved
+                    else RunStatus.FAILED
+                ),
+                event_type="approval_approved" if approved else "approval_denied",
+                event_id=approval_id,
+                evidence_refs=list(approval.evidence_refs),
             )
             # Approval resolution is durable before the external signal.
             self.store.save_run(run)
@@ -471,11 +536,17 @@ class AgentRuntime:
                     binding.snapshot_ref = sandbox.snapshot_ref
                     run.sandbox_binding = binding
 
-        run.status = RunStatus.PAUSED
+        original_transition_events = list(run.transition_events)
+        self._transition_run(
+            run,
+            to_status=RunStatus.PAUSED,
+            event_type="run_paused",
+        )
         try:
             self.store.save_run(run)
         except Exception:
             run.status = RunStatus.RUNNING
+            run.transition_events = original_transition_events
             run.sandbox_snapshot_ref = original_snapshot_ref
             if run.sandbox_binding is not None:
                 run.sandbox_binding.snapshot_ref = (
@@ -503,7 +574,12 @@ class AgentRuntime:
                 session_id=run.session_id,
             )
             previous_status = run.status
-            run.status = RunStatus.RUNNING
+            original_transition_events = list(run.transition_events)
+            self._transition_run(
+                run,
+                to_status=RunStatus.RUNNING,
+                event_type="run_resumed",
+            )
             try:
                 return self._replace_sandbox(
                     run,
@@ -513,9 +589,14 @@ class AgentRuntime:
                 )
             except Exception:
                 run.status = previous_status
+                run.transition_events = original_transition_events
                 raise
 
-        run.status = RunStatus.RUNNING
+        self._transition_run(
+            run,
+            to_status=RunStatus.RUNNING,
+            event_type="run_resumed",
+        )
         self.store.save_run(run)
         return run
 
@@ -588,6 +669,126 @@ class AgentRuntime:
         self.store.save_session(session)
         return session
 
+    def _queue_cancel_sandbox_cleanup(self, run: Run) -> bool:
+        """Persist cleanup intent for the sandbox bound to a cancelled Run."""
+        try:
+            binding = self._ensure_binding(run)
+        except ValueError:
+            # Explicit external sandbox refs are not managed by this provider
+            # contract; they must not prevent the canonical Run from cancelling.
+            return False
+        if binding is None or not binding.sandbox_ref:
+            return False
+        if (
+            run.metadata.get("cancel_cleanup_completed_ref") == binding.sandbox_ref
+        ):
+            return False
+        if binding.sandbox_ref in binding.pending_cleanup_refs:
+            return False
+        binding.pending_cleanup_refs.append(binding.sandbox_ref)
+        run.sandbox_binding = binding
+        return True
+
+    def _finish_cancel_sandbox_cleanup(self, run_id: str) -> Run:
+        """Retry durable sandbox cleanup and drop terminal Run cache on success."""
+        candidate = self.store.get_run(run_id)
+        try:
+            self._ensure_binding(candidate)
+        except ValueError:
+            # No supported provider binding exists for this external reference.
+            self._sandboxes.pop(run_id, None)
+            return candidate
+        run = self.cleanup_retired_sandboxes(run_id)
+        binding = run.sandbox_binding
+        if run.status == RunStatus.CANCELLED and (
+            binding is None or not binding.pending_cleanup_refs
+        ):
+            self._sandboxes.pop(run_id, None)
+        return run
+
+    def _signal_cancelled_workflow(self, run: Run) -> None:
+        """Signal durable cancellation, attempting resource cleanup on failure."""
+        if self.workflow_driver is None or run.workflow_ref is None:
+            return
+        payload = {
+            "event_id": run.metadata.get("cancel_event_id") or None,
+            "reason": run.metadata["terminal_reason"],
+            "evidence_refs": json.loads(run.metadata["cancel_evidence_refs"]),
+        }
+        try:
+            self.workflow_driver.signal(
+                run.workflow_ref,
+                name="cancel_run",
+                payload=payload,
+            )
+        except Exception:
+            # Cancellation is already durable. Try to stop resource consumption
+            # even if the signal channel is unavailable; cleanup errors must not
+            # replace the original workflow signal error.
+            try:
+                self._finish_cancel_sandbox_cleanup(run.run_id)
+            except Exception:
+                pass
+            raise
+
+    def cancel_run(
+        self,
+        run_id: str,
+        *,
+        reason: str = "cancelled by caller",
+        event_id: str | None = None,
+        evidence_refs: list[EvidenceRef | str] | None = None,
+    ) -> Run:
+        """Persist cancellation intent, signal the workflow, then retryable cleanup.
+
+        The canonical Run and its cleanup intent are durable before the workflow
+        signal. Retries must match the original request and reuse its identity.
+        """
+        run = self.store.get_run(run_id)
+        refs = [str(ref) for ref in (evidence_refs or [])]
+        cancellation_metadata = {
+            "terminal_reason": reason,
+            "cancel_event_id": event_id or "",
+            "cancel_evidence_refs": json.dumps(
+                refs, separators=(",", ":"), ensure_ascii=False
+            ),
+        }
+
+        if run.status == RunStatus.CANCELLED:
+            # The first durable cancellation request is authoritative. A retry
+            # may redeliver it, but must not silently rewrite its intent.
+            for key, value in cancellation_metadata.items():
+                if run.metadata.get(key) != value:
+                    raise ValueError(
+                        "cancellation retry metadata differs from durable request"
+                    )
+            # Also backfill cleanup intent for cancelled Runs persisted before
+            # cleanup was made part of the cancellation contract.
+            if self._queue_cancel_sandbox_cleanup(run):
+                self.store.save_run(run)
+            self._signal_cancelled_workflow(run)
+            return self._finish_cancel_sandbox_cleanup(run_id)
+
+        if run.status in (RunStatus.SUCCEEDED, RunStatus.FAILED):
+            raise ValueError(f"terminal run cannot be cancelled: {run.status.value}")
+
+        self._transition_run(
+            run,
+            to_status=RunStatus.CANCELLED,
+            event_type="run_cancelled",
+            event_id=event_id,
+            evidence_refs=refs,
+        )
+        run.evidence_refs.extend(
+            ref for ref in (evidence_refs or []) if ref not in run.evidence_refs
+        )
+        run.metadata = {**dict(run.metadata), **cancellation_metadata}
+        self._queue_cancel_sandbox_cleanup(run)
+        self.store.save_run(run)
+
+        self._signal_cancelled_workflow(run)
+        return self._finish_cancel_sandbox_cleanup(run_id)
+
     def complete_run(
         self,
         run_id: str,
@@ -599,7 +800,12 @@ class AgentRuntime:
         if run.status != RunStatus.RUNNING:
             raise ValueError("only running runs can complete")
 
-        run.status = RunStatus.SUCCEEDED
+        self._transition_run(
+            run,
+            to_status=RunStatus.SUCCEEDED,
+            event_type="run_succeeded",
+            evidence_refs=[str(ref) for ref in (evidence_refs or [])],
+        )
         run.artifact_refs.extend(artifact_refs or [])
         run.evidence_refs.extend(evidence_refs or [])
         self.store.save_run(run)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any
 
 from .workflow import WorkflowRef
@@ -27,9 +28,7 @@ def _workflow_status_name(status: Any) -> str:
     if status is None:
         return ""
     name = getattr(status, "name", None)
-    if isinstance(name, str) and name:
-        return name.upper()
-    value = str(status).upper()
+    value = name.upper() if isinstance(name, str) and name else str(status).upper()
     if "." in value:
         value = value.rsplit(".", 1)[-1]
     if value.startswith("WORKFLOW_EXECUTION_STATUS_"):
@@ -96,7 +95,15 @@ class TemporalWorkflowDriver:
         *,
         runtime_run_id: str,
         session_id: str,
+        timeout_seconds: float | None = None,
     ) -> WorkflowRef:
+        if timeout_seconds is not None and (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(float(timeout_seconds))
+            or timeout_seconds <= 0
+        ):
+            raise ValueError("timeout_seconds must be a finite positive number")
         workflow_id = self.workflow_id_for(
             runtime_run_id
         )
@@ -117,6 +124,14 @@ class TemporalWorkflowDriver:
                     {
                         "runtime_run_id": runtime_run_id,
                         "session_id": session_id,
+                        **(
+                            {
+                                "timeout_seconds": timeout_seconds,
+                                "timeout_event_id": f"timeout:{runtime_run_id}",
+                            }
+                            if timeout_seconds is not None
+                            else {}
+                        ),
                     }
                 ],
                 id=workflow_id,
@@ -215,6 +230,56 @@ class TemporalWorkflowDriver:
                 workflow.workflow_id,
             )
 
-        if args is None:
-            return await handle.query(name)
-        return await handle.query(name, args)
+        if name == "run_state":
+            # A terminal execution no longer needs a live Worker to serve a
+            # query. Read its persisted result directly, avoiding a query that
+            # can wait on a workflow task which will never be polled again.
+            try:
+                description = await handle.describe()
+                status = getattr(description, "status", None)
+                if isinstance(description, dict):
+                    status = description.get("status")
+                if _workflow_is_terminal(status):
+                    result = await handle.result()
+                    if isinstance(result, dict) and "phase" in result:
+                        phase = str(result["phase"])
+                        return {
+                            **result,
+                            "paused": phase == "paused",
+                            "terminal": True,
+                            "approval_events": list(
+                                result.get("approval_events", [])
+                            ),
+                        }
+            except Exception:
+                # The live query below may still work if describe/result is
+                # temporarily unavailable or the execution is nonterminal.
+                pass
+
+        try:
+            if args is None:
+                return await handle.query(name)
+            return await handle.query(name, args)
+        except Exception:
+            if name != "run_state":
+                raise
+
+            # Close can race the first describe/query. Re-check durable status
+            # before deciding whether the query error should be propagated.
+            description = await handle.describe()
+            status = getattr(description, "status", None)
+            if isinstance(description, dict):
+                status = description.get("status")
+            if not _workflow_is_terminal(status):
+                raise
+
+            result = await handle.result()
+            if not isinstance(result, dict) or "phase" not in result:
+                raise
+            phase = str(result["phase"])
+            return {
+                **result,
+                "paused": phase == "paused",
+                "terminal": True,
+                "approval_events": list(result.get("approval_events", [])),
+            }
