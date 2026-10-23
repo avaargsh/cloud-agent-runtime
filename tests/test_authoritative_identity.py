@@ -348,7 +348,16 @@ def test_revocation_fanout_revokes_authority_before_existing_leases():
     }
     approvals = AuthoritativeApprovalResolver(transport)
     broker = make_broker(transport)
-    fanout = ApprovalRevocationFanout(approvals=approvals, broker=broker)
+
+    class TrustedOutboxVerifier:
+        def verify(self, event):
+            return event.source == "trusted-approval-outbox"
+
+    fanout = ApprovalRevocationFanout(
+        approvals=approvals,
+        broker=broker,
+        event_verifier=TrustedOutboxVerifier(),
+    )
 
     assert fanout.handle(ApprovalRevocationEvent(
         event_id="event-1",
@@ -360,7 +369,7 @@ def test_revocation_fanout_revokes_authority_before_existing_leases():
     )
     assert transport.calls[1] == (
         "POST", "/v1/workload-credentials:revoke-approval",
-        {"approval_id": "approval-a"},
+        {"approval_id": "approval-a", "event_id": "event-1"},
     )
 
 
@@ -372,9 +381,14 @@ def test_revocation_fanout_surfaces_broker_failure_for_retry():
     transport.errors[("POST", "/v1/workload-credentials:revoke-approval")] = (
         RuntimeError("broker down")
     )
+    class TrustedOutboxVerifier:
+        def verify(self, event):
+            return event.source == "trusted-approval-outbox"
+
     fanout = ApprovalRevocationFanout(
         approvals=AuthoritativeApprovalResolver(transport),
         broker=make_broker(transport),
+        event_verifier=TrustedOutboxVerifier(),
     )
     with pytest.raises(RuntimeError, match="broker down"):
         fanout.handle(ApprovalRevocationEvent(
@@ -405,3 +419,24 @@ def test_production_transport_requires_verified_https_and_bounded_timeout():
             service_token_provider=lambda: "secret",
             timeout_seconds=90,
         )
+
+def test_untrusted_revocation_event_is_denied_before_any_authority_mutation():
+    transport = FakeTransport()
+
+    class RejectAllVerifier:
+        def verify(self, event):
+            return False
+
+    fanout = ApprovalRevocationFanout(
+        approvals=AuthoritativeApprovalResolver(transport),
+        broker=make_broker(transport),
+        event_verifier=RejectAllVerifier(),
+    )
+    with pytest.raises(IdentityAuthorizationError, match="authentication failed"):
+        fanout.handle(ApprovalRevocationEvent(
+            event_id="untrusted-event",
+            approval_id="approval-a",
+            source="caller-controlled",
+        ))
+    assert transport.calls == []
+
