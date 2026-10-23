@@ -714,7 +714,17 @@ def test_rebind_replay_recovers_when_cleanup_commit_fails_after_termination():
 
 
 @pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
-def test_session_identity_cannot_be_rebound(store_kind, tmp_path):
+@pytest.mark.parametrize(
+    ("identity_field", "replacement"),
+    [
+        ("agent_id", "agent-b"),
+        ("release_id", "release-v2"),
+        ("tenant_id", "tenant-b"),
+    ],
+)
+def test_session_identity_cannot_be_rebound(
+    store_kind, identity_field, replacement, tmp_path
+):
     from cloud_agent_runtime.models import Session
 
     store = (
@@ -722,28 +732,25 @@ def test_session_identity_cannot_be_rebound(store_kind, tmp_path):
         if store_kind == "memory"
         else SQLiteStore(tmp_path / "session-identity.db")
     )
-    original = Session(
-        session_id="stable-session",
-        agent_id="agent-a",
-        release_id="release-v1",
-        tenant_id="tenant-a",
-    )
-    store.save_session(original)
+    original_values = {
+        "session_id": "stable-session",
+        "agent_id": "agent-a",
+        "release_id": "release-v1",
+        "tenant_id": "tenant-a",
+    }
+    store.save_session(Session(**original_values))
 
+    conflicting_values = {
+        **original_values,
+        identity_field: replacement,
+    }
     with pytest.raises(ValueError, match="session identity is immutable"):
-        store.save_session(
-            Session(
-                session_id="stable-session",
-                agent_id="agent-b",
-                release_id="release-v1",
-                tenant_id="tenant-a",
-            )
-        )
+        store.save_session(Session(**conflicting_values))
 
     persisted = store.get_session("stable-session")
-    assert persisted.agent_id == "agent-a"
-    assert persisted.release_id == "release-v1"
-    assert persisted.tenant_id == "tenant-a"
+    assert persisted.agent_id == original_values["agent_id"]
+    assert persisted.release_id == original_values["release_id"]
+    assert persisted.tenant_id == original_values["tenant_id"]
     if isinstance(store, SQLiteStore):
         store.close()
 
