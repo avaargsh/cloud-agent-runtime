@@ -12,6 +12,15 @@ class FakeKubectl:
         self.calls.append((tuple(args), stdin))
         if args[:2] == ["get", "namespace"]:
             return KubectlResult(0 if self.namespace_exists else 1, "", "")
+        if "get" in args and "pod" in args:
+            pod = args[args.index("pod") + 1]
+            if pod in self.pods:
+                return KubectlResult(0, f"pod/{pod}", "")
+            return KubectlResult(
+                1,
+                "",
+                f'Error from server (NotFound): pods "{pod}" not found',
+            )
         if args[:2] == ["create", "namespace"]:
             self.namespace_exists = True
             return KubectlResult(0, "", "")
@@ -69,11 +78,26 @@ def test_terminate_is_orphan_cleanup_safe():
     sandbox = provider.allocate()
     provider.bind(sandbox, session_id="session-1")
 
+    assert provider.is_gone(sandbox.sandbox_id) is False
     provider.terminate(sandbox)
+    assert provider.is_gone(sandbox.sandbox_id) is True
     # A second cleanup attempt must remain safe because kubectl uses
     # --ignore-not-found=true.
     provider.terminate(sandbox)
+    assert provider.is_gone(sandbox.sandbox_id) is True
 
     delete_calls = [args for args, _ in kubectl.calls if "delete" in args]
     assert len(delete_calls) == 2
     assert all("--ignore-not-found=true" in args for args in delete_calls)
+
+
+def test_kubernetes_is_gone_fails_closed_on_unknown_api_error():
+    def failed_get(args, *, stdin=None):
+        if "get" in args and "pod" in args:
+            return KubectlResult(1, "", "connection refused")
+        return KubectlResult(1, "", "unexpected kubectl call")
+
+    provider = KubernetesSandboxProvider(kubectl=failed_get)
+    import pytest
+    with pytest.raises(RuntimeError, match="could not independently establish"):
+        provider.is_gone("pod-unknown")
