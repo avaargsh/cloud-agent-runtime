@@ -94,6 +94,16 @@ class KubernetesSandboxProvider:
             )
         return result
 
+    def _delete_namespace_best_effort(self, namespace: str) -> None:
+        try:
+            self._invoke_kubectl([
+                "delete", "namespace", namespace,
+                "--ignore-not-found=true", "--wait=false",
+            ])
+        except Exception:
+            # Keep the allocation exception primary; reconciliation may retry.
+            pass
+
     def ensure_namespace(self, namespace: str | None = None) -> None:
         target = namespace or self.namespace
         probe = self._invoke_kubectl(["get", "namespace", target, "-o", "name"])
