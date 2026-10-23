@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Protocol
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlsplit
 
 from .models import RunStatus, SessionStatus
 from .store import RuntimeStore
@@ -307,6 +307,8 @@ class HttpsRuntimeStoreRunAuthorityReader:
             if isinstance(exc, RuntimeIdentityNotFoundError):
                 raise
             raise RuntimeIdentityUnavailableError("canonical Runtime identity service is unavailable") from None
+        if not isinstance(payload, Mapping):
+            raise RuntimeIdentityProtocolError("canonical Runtime identity response must be an object")
         if payload.get("contract_version") != CANONICAL_RUN_CONTRACT_VERSION:
             raise RuntimeIdentityProtocolError("canonical Runtime identity contract version is unsupported")
         try:
@@ -322,11 +324,17 @@ class HttpsRuntimeStoreRunAuthorityReader:
                 raise RuntimeIdentityProtocolError("sandbox revision must be a positive integer")
             if values["run_id"] != run_id:
                 raise RuntimeIdentityProtocolError("canonical response Run ID mismatch")
-            if values["workspace_ref"] != f"sandbox://{payload.get('provider', '')}/{values['sandbox_id']}":
-                # Older deployments may not project provider as a separate
-                # top-level field. Validate against the canonical URI instead.
-                if not values["workspace_ref"].startswith("sandbox://") or values["workspace_ref"].endswith("/"):
-                    raise RuntimeIdentityProtocolError("canonical workspace reference is invalid")
+            workspace = urlsplit(values["workspace_ref"])
+            if (
+                workspace.scheme != "sandbox"
+                or not workspace.netloc
+                or workspace.path != f"/{values['sandbox_id']}"
+                or workspace.query
+                or workspace.fragment
+                or workspace.username is not None
+                or workspace.password is not None
+            ):
+                raise RuntimeIdentityProtocolError("canonical workspace reference is invalid")
             run_status = _status_value(payload.get("status"), "status", self._RUN_STATES)
             session_status = _status_value(
                 payload.get("session_status"), "session_status", self._SESSION_STATES
