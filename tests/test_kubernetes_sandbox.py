@@ -16,6 +16,15 @@ class FakeKubectl:
         self.calls.append((tuple(args), stdin))
         if args[:2] == ["get", "namespace"]:
             return KubectlResult(0 if self.namespace_exists else 1, "", "")
+        if "get" in args and "pod" in args:
+            pod = args[args.index("pod") + 1]
+            if pod in self.pods:
+                return KubectlResult(0, f"pod/{pod}", "")
+            return KubectlResult(
+                1,
+                "",
+                f'Error from server (NotFound): pods "{pod}" not found',
+            )
         if args[:2] == ["create", "namespace"]:
             self.namespace_exists = True
             return KubectlResult(0, "", "")
@@ -130,3 +139,24 @@ def test_delete_timeout_is_ambiguous_and_retry_uses_same_sandbox_id():
 def test_kubectl_command_timeout_must_be_finite_and_positive(timeout):
     with pytest.raises(ValueError, match="command_timeout_seconds"):
         KubernetesSandboxProvider(command_timeout_seconds=timeout)
+
+
+def test_kubernetes_provider_confirms_gone_with_independent_get():
+    kubectl = FakeKubectl()
+    provider = KubernetesSandboxProvider(kubectl=kubectl)
+    sandbox = provider.bind(provider.allocate(), session_id="session-gone")
+    assert provider.is_gone(sandbox.sandbox_id) is False
+
+    provider.terminate(sandbox)
+    assert provider.is_gone(sandbox.sandbox_id) is True
+
+
+def test_kubernetes_provider_unknown_gone_status_fails_closed():
+    def failed_get(args, *, stdin=None):
+        if "get" in args and "pod" in args:
+            return KubectlResult(1, "", "connection refused")
+        return KubectlResult(1, "", "unexpected kubectl call")
+
+    provider = KubernetesSandboxProvider(kubectl=failed_get)
+    with pytest.raises(RuntimeError, match="could not independently establish"):
+        provider.is_gone("pod-unknown")
