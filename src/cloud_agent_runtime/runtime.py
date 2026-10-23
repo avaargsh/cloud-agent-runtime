@@ -203,7 +203,9 @@ class AgentRuntime:
         return self.cleanup_retired_sandboxes(run.run_id)
 
     def cleanup_retired_sandboxes(self, run_id: str) -> Run:
-        """Retry cleanup for sandboxes retired by a durable replacement."""
+        """Retry cleanup with a stable operation ID and durable outcome evidence."""
+        from .temporal_driver import deterministic_cleanup_operation_id
+
         run = self.store.get_run(run_id)
         binding = self._ensure_binding(run)
         if binding is None or not binding.pending_cleanup_refs:
@@ -213,29 +215,85 @@ class AgentRuntime:
 
         remaining: list[str] = []
         changed = False
-
         for ref in binding.pending_cleanup_refs:
+            operation_id = deterministic_cleanup_operation_id(run_id, ref)
+            attempt = sum(
+                1 for event in run.recovery_evidence
+                if event.get("operation_id") == operation_id
+            ) + 1
             try:
                 provider, sandbox_id = self._parse_sandbox_ref(ref)
                 if provider != self.sandbox_provider.name:
                     remaining.append(ref)
+                    run.recovery_operation_id = operation_id
+                    run.recovery_state = "unknown"
+                    run.recovery_attempts = max(run.recovery_attempts, attempt)
+                    run.recovery_evidence.append({
+                        "operation_id": operation_id,
+                        "outcome": "blocked",
+                        "attempt": str(attempt),
+                        "detail": f"cleanup provider mismatch: expected {self.sandbox_provider.name}, got {provider}; owner_run={run_id}; sandbox_ref={ref}",
+                    })
+                    changed = True
                     continue
+
                 retired = Sandbox(
                     sandbox_id=sandbox_id,
                     provider=provider,
                     status=SandboxStatus.BOUND,
                     session_id=run.session_id,
                 )
-                self.sandbox_provider.terminate(retired)
+                # Intent is persisted first. If the provider terminates the
+                # sandbox but the response is lost, the same operation ID is
+                # retried and the unresolved ownership stays visible.
+                run.recovery_operation_id = operation_id
+                run.recovery_state = "cleanup_pending"
+                run.recovery_attempts = max(run.recovery_attempts, attempt)
+                run.recovery_evidence.append({
+                    "operation_id": operation_id,
+                    "outcome": "intent_persisted",
+                    "attempt": str(attempt),
+                    "detail": f"owner_run={run_id}; sandbox_ref={ref}",
+                })
+                self.store.save_run(run)
+
+                try:
+                    self.sandbox_provider.terminate(retired)
+                except Exception as exc:
+                    remaining.append(ref)
+                    run.recovery_state = "unknown"
+                    run.recovery_evidence.append({
+                        "operation_id": operation_id,
+                        "outcome": "unknown",
+                        "attempt": str(attempt),
+                        "detail": f"cleanup response absent/failed: {type(exc).__name__}: {exc}; ownership retained for retry",
+                    })
+                    changed = True
+                    continue
+
                 changed = True
-            except Exception:
+                run.recovery_state = "cleanup_acknowledged"
+                run.recovery_evidence.append({
+                    "operation_id": operation_id,
+                    "outcome": "acknowledged",
+                    "attempt": str(attempt),
+                    "detail": f"provider acknowledged terminate for owner_run={run_id}; sandbox_ref={ref}",
+                })
+            except Exception as exc:
                 remaining.append(ref)
+                run.recovery_state = "unknown"
+                run.recovery_evidence.append({
+                    "operation_id": operation_id,
+                    "outcome": "unknown",
+                    "attempt": str(attempt),
+                    "detail": f"cleanup unresolved for sandbox_ref={ref}: {type(exc).__name__}: {exc}",
+                })
+                changed = True
 
         if changed or remaining != binding.pending_cleanup_refs:
             binding.pending_cleanup_refs = remaining
             run.sandbox_binding = binding
             self.store.save_run(run)
-
         return run
 
     def create_session(
