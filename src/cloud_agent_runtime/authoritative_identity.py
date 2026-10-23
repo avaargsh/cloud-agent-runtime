@@ -14,6 +14,12 @@ from urllib.request import (
     build_opener,
 )
 
+# Temporal's workflow sandbox inspects every imported module in the workflow
+# call graph. This transport is an external I/O adapter and is never invoked
+# from deterministic workflow code; pass through the stdlib HTTP layer.
+from temporalio.workflow import unsafe
+
+
 from .identity import (
     ApprovalGrant,
     ApprovalResolver,
@@ -80,6 +86,7 @@ class WorkloadAssertionIssuer(Protocol):
         ...
 
 
+@unsafe.imports_passed_through()
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # Prevent forwarding service bearer tokens to redirect targets.
