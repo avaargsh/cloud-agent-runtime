@@ -286,7 +286,7 @@ try:
     # Finally verify ordinary termination destroys the replacement namespace.
     provider.terminate(sandbox_b)
     wait_namespace_gone(sandbox_b_namespace)
-    k("delete", "namespace", tenant_b_namespace, "--wait=true", "--timeout=60s")
+    k("delete", "namespace", tenant_b_namespace, "--wait=true", "--timeout=60s", timeout=75)
     print("PASS")
     print(f"run_id={run.run_id}")
     print(f"session_id={session.session_id}")

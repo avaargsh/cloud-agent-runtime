@@ -136,6 +136,7 @@ def identity_payload():
         "session_id": value.session_id,
         "run_id": value.run_id,
         "sandbox_id": value.sandbox_id,
+        "sandbox_revision": value.sandbox_revision,
         "workspace_ref": value.workspace_ref,
         "binding_id": value.binding_id,
         "capability": value.capability,
@@ -307,7 +308,7 @@ def test_revocation_contract_requires_valid_acknowledgements():
     }
     assert broker.revoke_credential("cred-001") is True
     assert broker.revoke_run("run-a", sandbox_revision=3) == 2
-    assert transport.calls[-2] == (
+    assert transport.calls[1] == (
         "POST",
         "/v1/workload-credentials:revoke-run",
         {"run_id": "run-a", "sandbox_revision": 3},
