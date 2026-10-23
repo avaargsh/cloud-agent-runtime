@@ -96,6 +96,7 @@ class TemporalWorkflowDriver:
         *,
         runtime_run_id: str,
         session_id: str,
+        timeout_seconds: float | None = None,
     ) -> WorkflowRef:
         workflow_id = self.workflow_id_for(
             runtime_run_id
@@ -117,6 +118,7 @@ class TemporalWorkflowDriver:
                     {
                         "runtime_run_id": runtime_run_id,
                         "session_id": session_id,
+                        "timeout_seconds": timeout_seconds,
                     }
                 ],
                 id=workflow_id,
