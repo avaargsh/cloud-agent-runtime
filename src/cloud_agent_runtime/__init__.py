@@ -105,3 +105,17 @@ __all__ = [
     "WorkflowRef",
     "execute_tool",
 ]
+
+from .identity import (
+    ApprovalGrant,
+    AuthenticatedPrincipal,
+    CredentialBinding,
+    CredentialExpiredError,
+    CredentialLease,
+    CredentialReplayError,
+    CredentialRequest,
+    IdentityAuthorizationError,
+    InMemoryApprovalResolver,
+    InMemoryCredentialBroker,
+    WorkloadIdentity,
+)
