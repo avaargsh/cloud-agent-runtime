@@ -180,3 +180,63 @@ def test_temporal_driver_rejects_duplicate_when_status_cannot_be_verified() -> N
             )
 
     asyncio.run(scenario())
+
+
+
+def test_temporal_driver_passes_timeout_deadline_into_workflow_input():
+    async def scenario():
+        client = FakeClient()
+        driver = TemporalWorkflowDriver(client=client, task_queue="agent-runs")
+        await driver.start_run(
+            runtime_run_id="run-deadline",
+            session_id="session-deadline",
+            timeout_seconds=17,
+        )
+        payload = client.started[0]["args"][0]
+        assert payload["runtime_run_id"] == "run-deadline"
+        assert payload["session_id"] == "session-deadline"
+        assert payload["timeout_seconds"] == 17
+        assert payload["timeout_event_id"] == "timeout:run-deadline"
+
+    asyncio.run(scenario())
+
+
+def test_temporal_driver_reads_terminal_run_state_from_history_result():
+    class ClosedHandle(FakeHandle):
+        async def query(self, name, *args):
+            raise RuntimeError("closed workflow does not service queries")
+
+        async def describe(self):
+            return {"status": "COMPLETED"}
+
+        async def result(self):
+            return {
+                "runtime_run_id": "run-closed",
+                "session_id": "session-closed",
+                "phase": "failed",
+                "error": "run timed out after 1 seconds",
+                "evidence_refs": ["evidence://timeout/closed"],
+                "transition_events": [
+                    {"event_type": "run_timed_out", "event_id": "timeout:run-closed"}
+                ],
+            }
+
+    async def scenario():
+        client = FakeClient()
+        client.handle = ClosedHandle()
+        driver = TemporalWorkflowDriver(client=client, task_queue="agent-runs")
+        from cloud_agent_runtime.workflow import WorkflowRef
+        state = await driver.query(
+            WorkflowRef(
+                provider="temporal",
+                workflow_id="agent-run-run-closed",
+                run_id="temporal-run-1",
+            ),
+            name="run_state",
+        )
+        assert state["phase"] == "failed"
+        assert state["terminal"] is True
+        assert state["paused"] is False
+        assert state["runtime_run_id"] == "run-closed"
+
+    asyncio.run(scenario())
