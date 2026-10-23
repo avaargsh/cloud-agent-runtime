@@ -415,6 +415,9 @@ def test_cleanup_lost_ack_is_retryable_with_same_operation_and_evidence() -> Non
         "observed_gone",
         "acknowledged",
     ]
+    assert [event["attempt"] for event in second_events] == [
+        "1", "1", "2", "2", "2",
+    ]
     assert len(provider.terminate_calls) == 2
     assert all(call[0] == old_id for call in provider.terminate_calls)
 
