@@ -9,6 +9,7 @@ def initialized_workflow() -> AgentRunWorkflow:
     instance._state = AgentRunWorkflowState(
         runtime_run_id="run-1",
         session_id="session-1",
+        phase="running",
     )
     return instance
 
@@ -165,4 +166,33 @@ def test_cancel_is_terminal_and_audited() -> None:
         "to_phase": "cancelled",
         "evidence_refs": ["evidence://ops/cancel-approval"],
     }
+
+def test_waiting_and_resume_transitions_are_audited() -> None:
+    workflow = initialized_workflow()
+    workflow.wait_for_input(
+        {
+            "event_id": "approval-request-1",
+            "evidence_refs": ["evidence://approval/request"],
+        }
+    )
+    workflow.approval_resolved(
+        {
+            "approval_id": "approval-1",
+            "approved": True,
+            "evidence_refs": ["evidence://approval/decision"],
+        }
+    )
+
+    state = workflow.run_state()
+    events = state["transition_events"]
+    assert [(event["from_phase"], event["to_phase"]) for event in events] == [
+        ("running", "waiting"),
+        ("waiting", "running"),
+    ]
+    assert events[0]["event_id"] == "approval-request-1"
+    assert events[1]["event_id"] == "approval-1"
+    assert state["evidence_refs"] == [
+        "evidence://approval/request",
+        "evidence://approval/decision",
+    ]
 
