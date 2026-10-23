@@ -54,6 +54,21 @@ class KubernetesSandboxProvider:
         suffix = sandbox_id.rsplit("-", 1)[-1]
         return f"{prefix}-sbx-{suffix}"
 
+    def _invoke_kubectl(
+        self,
+        args: list[str],
+        *,
+        stdin: str | None = None,
+    ) -> KubectlResult:
+        try:
+            return self._kubectl(args, stdin=stdin)
+        except subprocess.TimeoutExpired as exc:
+            command = "kubectl " + " ".join(args)
+            raise RuntimeError(
+                f"{command} timed out after "
+                f"{self.command_timeout_seconds:g} seconds; outcome may be unknown"
+            ) from exc
+
     def _run_kubectl(self, args: list[str], *, stdin: str | None = None) -> KubectlResult:
         try:
             result = subprocess.run(
