@@ -360,3 +360,51 @@ def test_unknown_start_without_reconciliation_capability_fails_closed() -> None:
         assert store.get_run(run_id).recovery_state == "unknown"
 
     asyncio.run(scenario())
+
+
+def test_uncertain_run_reconciliation_survives_sqlite_store_reconstruction(tmp_path) -> None:
+    async def scenario():
+        from cloud_agent_runtime.async_runtime import RunRecoveryConflict
+        from cloud_agent_runtime import SQLiteStore
+
+        db_path = tmp_path / "runtime.sqlite"
+        store_before_restart = SQLiteStore(db_path)
+        driver = InMemoryAsyncWorkflowDriver()
+        driver.start_outcome_unknown_once = True
+        runtime = AsyncAgentRuntime(
+            store=store_before_restart,
+            sandbox_provider=InMemorySandboxProvider(),
+            workflow_driver=driver,
+        )
+        session = runtime.create_session(
+            agent_id="sre-agent",
+            release_id="release-v1",
+            tenant_id="tenant-a",
+        )
+
+        with pytest.raises(RuntimeError, match="lost acknowledgement"):
+            await runtime.start_run(session_id=session.session_id)
+        original_run_id = next(iter(store_before_restart.runs))
+        store_before_restart.close()
+
+        store_after_restart = SQLiteStore(db_path)
+        persisted = store_after_restart.get_run(original_run_id)
+        assert persisted.run_id == original_run_id
+        assert persisted.workflow_ref is None
+        assert persisted.recovery_state == "unknown"
+        assert persisted.recovery_operation_id == f"agent-run-start:{original_run_id}"
+
+        restarted_runtime = AsyncAgentRuntime(
+            store=store_after_restart,
+            sandbox_provider=InMemorySandboxProvider(),
+            workflow_driver=driver,
+        )
+        recovered = await restarted_runtime.reconcile_run(original_run_id)
+        assert recovered.run_id == original_run_id
+        assert recovered.workflow_ref.workflow_id == f"agent-run-{original_run_id}"
+        assert recovered.recovery_state == "attached"
+        assert len(driver.started) == 1
+
+        store_after_restart.close()
+
+    asyncio.run(scenario())
