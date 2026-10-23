@@ -110,6 +110,7 @@ def test_temporal_worker_restart_replays_history_and_deduplicates_signal() -> No
                 env.client,
                 task_queue=task_queue,
                 workflows=[AgentRunWorkflow],
+                max_cached_workflows=0,
             ):
                 handle = await env.client.start_workflow(
                     AgentRunWorkflow.run,
@@ -152,6 +153,7 @@ def test_temporal_worker_restart_replays_history_and_deduplicates_signal() -> No
                 env.client,
                 task_queue=task_queue,
                 workflows=[AgentRunWorkflow],
+                max_cached_workflows=0,
             ):
                 replayed = await handle.query(AgentRunWorkflow.run_state)
                 assert handle.id == workflow_id
@@ -339,6 +341,7 @@ def test_temporal_deadline_survives_worker_restart_and_replay() -> None:
                 env.client,
                 task_queue=task_queue,
                 workflows=[AgentRunWorkflow],
+                max_cached_workflows=0,
             ):
                 handle = await env.client.start_workflow(
                     AgentRunWorkflow.run,
@@ -358,6 +361,7 @@ def test_temporal_deadline_survives_worker_restart_and_replay() -> None:
                 env.client,
                 task_queue=task_queue,
                 workflows=[AgentRunWorkflow],
+                max_cached_workflows=0,
             ):
                 result = await handle.result()
                 assert result["phase"] == "failed"
