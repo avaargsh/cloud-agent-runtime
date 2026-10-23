@@ -9,7 +9,8 @@ from cloud_agent_runtime import (
     InMemorySandboxProvider,
     RunStatus,
 )
-from cloud_agent_runtime.store import InMemoryStore
+from cloud_agent_runtime.store import InMemoryStore, SQLiteStore
+from cloud_agent_runtime.temporal_driver import TemporalWorkflowDriver
 
 
 def test_async_runtime_starts_workflow_and_signals_approval() -> None:
@@ -62,12 +63,20 @@ def test_async_runtime_starts_workflow_and_signals_approval() -> None:
     asyncio.run(scenario())
 
 
-def test_async_workflow_start_failure_marks_run_failed() -> None:
+def test_async_workflow_start_failure_preserves_recoverable_pending_run() -> None:
+    from cloud_agent_runtime.workflow import WorkflowRef
+
     class FailingDriver:
         name = "failing"
 
+        def reference_for_run(self, runtime_run_id: str) -> WorkflowRef:
+            return WorkflowRef(
+                provider=self.name,
+                workflow_id=f"workflow-{runtime_run_id}",
+            )
+
         async def start_run(self, **kwargs):
-            raise RuntimeError("temporal unavailable")
+            raise RuntimeError("temporal outcome unavailable")
 
         async def signal(self, *args, **kwargs):
             return None
@@ -86,15 +95,20 @@ def test_async_workflow_start_failure_marks_run_failed() -> None:
             tenant_id="tenant-a",
         )
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="temporal outcome unavailable"):
             await runtime.start_run(
                 session_id=session.session_id,
+                run_id="run-pending-1",
             )
 
-        runs = list(runtime.store.runs.values())
-        assert len(runs) == 1
-        assert runs[0].status == RunStatus.FAILED
-        assert runtime._sandboxes == {}
+        pending = runtime.store.get_run("run-pending-1")
+        assert pending.status == RunStatus.CREATED
+        assert pending.workflow_ref is not None
+        assert pending.workflow_ref.workflow_id == "workflow-run-pending-1"
+        assert pending.sandbox_ref is not None
+        # A start error is an ambiguous provider outcome, not proof the
+        # Workflow was not accepted. Keep the sandbox and canonical Run.
+        assert len(runtime._sandboxes) == 1
 
     asyncio.run(scenario())
 
@@ -143,11 +157,11 @@ def test_async_binding_persistence_failure_terminates_workflow():
 
         runs = list(store.runs.values())
         assert len(runs) == 1
-        assert runs[0].status == RunStatus.FAILED
-        assert runs[0].workflow_ref is None
-        assert len(driver.terminated) == 1
-        assert driver.terminated[0][1] == "runtime binding persistence failed"
-        assert runtime._sandboxes == {}
+        assert runs[0].status == RunStatus.CREATED
+        assert runs[0].workflow_ref is not None
+        assert runs[0].workflow_ref.workflow_id == f"workflow-{runs[0].run_id}"
+        assert driver.terminated == []
+        assert len(runtime._sandboxes) == 1
 
     asyncio.run(scenario())
 
@@ -177,9 +191,11 @@ def test_async_termination_failure_retains_workflow_ref():
 
         runs = list(store.runs.values())
         assert len(runs) == 1
-        assert runs[0].status == RunStatus.FAILED
+        assert runs[0].status == RunStatus.CREATED
         assert runs[0].workflow_ref is not None
-        assert runtime._sandboxes == {}
+        assert runs[0].workflow_ref.workflow_id == f"workflow-{runs[0].run_id}"
+        assert driver.terminated == []
+        assert len(runtime._sandboxes) == 1
 
     asyncio.run(scenario())
 
@@ -258,5 +274,120 @@ def test_async_approval_resolution_retry_redelivers_same_signal() -> None:
             "reason": "approved after review",
             "evidence_refs": ["evidence://approval/input"],
         }
+
+    asyncio.run(scenario())
+
+
+def test_run_start_recovers_after_lost_temporal_ack_using_original_ids(tmp_path) -> None:
+    from temporalio.exceptions import WorkflowAlreadyStartedError
+
+    class FakeTemporalHandle:
+        first_execution_run_id = "temporal-run-1"
+
+        async def describe(self):
+            return {"status": "RUNNING"}
+
+    class AcceptThenLoseAckClient:
+        """External Temporal state survives while the caller/store is rebuilt."""
+
+        def __init__(self):
+            self.workflows = {}
+            self.start_requests = []
+            self.lose_first_ack = True
+
+        async def start_workflow(
+            self,
+            workflow_type,
+            *,
+            args,
+            id,
+            task_queue,
+            id_reuse_policy,
+        ):
+            self.start_requests.append({
+                "workflow_type": workflow_type,
+                "args": args,
+                "id": id,
+                "task_queue": task_queue,
+                "id_reuse_policy": id_reuse_policy,
+            })
+            if id in self.workflows:
+                raise WorkflowAlreadyStartedError(id, "temporal-run-1")
+            self.workflows[id] = FakeTemporalHandle()
+            if self.lose_first_ack:
+                self.lose_first_ack = False
+                raise TimeoutError("Temporal accepted start but client lost ACK")
+            return self.workflows[id]
+
+        def get_workflow_handle(self, workflow_id, **kwargs):
+            return self.workflows[workflow_id]
+
+    async def scenario():
+        database = tmp_path / "runtime.sqlite"
+        client = AcceptThenLoseAckClient()
+        provider = InMemorySandboxProvider()
+        driver = TemporalWorkflowDriver(client=client, task_queue="agent-runs")
+
+        first_store = SQLiteStore(database)
+        first_runtime = AsyncAgentRuntime(
+            store=first_store,
+            sandbox_provider=provider,
+            workflow_driver=driver,
+        )
+        session = first_runtime.create_session(
+            agent_id="sre-agent",
+            release_id="sre-agent-v1",
+            tenant_id="tenant-a",
+        )
+
+        with pytest.raises(TimeoutError, match="client lost ACK"):
+            await first_runtime.start_run(
+                session_id=session.session_id,
+                run_id="run-stable-123",
+            )
+
+        pending = first_store.get_run("run-stable-123")
+        assert pending.status == RunStatus.CREATED
+        assert pending.workflow_ref is not None
+        assert pending.workflow_ref.workflow_id == "agent-run-run-stable-123"
+        assert pending.workflow_ref.run_id is None
+        assert pending.sandbox_ref is not None
+        original_sandbox_ref = pending.sandbox_ref
+        first_store.close()
+
+        # Reconstruct the durable store and runtime as if the caller process
+        # died. The fake Temporal service remains alive with its accepted
+        # workflow, so replay must attach rather than create a second one.
+        second_store = SQLiteStore(database)
+        second_runtime = AsyncAgentRuntime(
+            store=second_store,
+            sandbox_provider=provider,
+            workflow_driver=driver,
+        )
+        recovered = await second_runtime.start_run(
+            session_id=session.session_id,
+            run_id="run-stable-123",
+        )
+
+        assert recovered.run_id == "run-stable-123"
+        assert recovered.session_id == session.session_id
+        assert recovered.status == RunStatus.RUNNING
+        assert recovered.workflow_ref is not None
+        assert recovered.workflow_ref.workflow_id == "agent-run-run-stable-123"
+        assert recovered.workflow_ref.run_id == "temporal-run-1"
+        assert recovered.sandbox_ref == original_sandbox_ref
+        assert list(client.workflows) == ["agent-run-run-stable-123"]
+        assert [request["id"] for request in client.start_requests] == [
+            "agent-run-run-stable-123",
+            "agent-run-run-stable-123",
+        ]
+        assert all(
+            request["args"] == [{
+                "runtime_run_id": "run-stable-123",
+                "session_id": session.session_id,
+            }]
+            for request in client.start_requests
+        )
+        second_store.close()
 
     asyncio.run(scenario())
