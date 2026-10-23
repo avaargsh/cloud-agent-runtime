@@ -378,7 +378,7 @@ def test_unknown_start_without_reconciliation_capability_fails_closed() -> None:
             sandbox_provider=InMemorySandboxProvider(),
             workflow_driver=NoReconcileDriver(),
         )
-        with pytest.raises(RunRecoveryConflict, match="Run remains unknown"):
+        with pytest.raises(RunRecoveryConflict, match="cannot verify provider workflow state"):
             await restarted.reconcile_run(run_id)
         assert store.get_run(run_id).recovery_state == "unknown"
 
