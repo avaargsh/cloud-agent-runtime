@@ -248,9 +248,14 @@ class AgentRuntime:
         changed = False
         for ref in original_refs:
             operation_id = deterministic_cleanup_operation_id(run_id, ref)
+            # Count logical mutation attempts, not individual audit
+            # events. Each attempt can emit intent + unknown/observed/ack events,
+            # all of which must keep the same attempt number.
             attempt = sum(
-                1 for event in run.recovery_evidence
+                1
+                for event in run.recovery_evidence
                 if event.get("operation_id") == operation_id
+                and event.get("outcome") in {"intent_persisted", "blocked"}
             ) + 1
             try:
                 provider, sandbox_id = self._parse_sandbox_ref(ref)
