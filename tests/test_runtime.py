@@ -413,3 +413,47 @@ def test_cleanup_lost_ack_is_retryable_with_same_operation_and_evidence() -> Non
     ]
     assert len(provider.terminate_calls) == 2
     assert all(call[0] == old_id for call in provider.terminate_calls)
+
+
+
+def test_unknown_cleanup_provider_keeps_reference_pending_and_fails_closed() -> None:
+    class TrackingTerminateProvider(InMemorySandboxProvider):
+        def __init__(self):
+            self.terminated_ids = []
+
+        def terminate(self, sandbox):
+            self.terminated_ids.append(sandbox.sandbox_id)
+            return super().terminate(sandbox)
+
+    from cloud_agent_runtime.temporal_driver import deterministic_cleanup_operation_id
+
+    provider = TrackingTerminateProvider()
+    rt = AgentRuntime(
+        sandbox_provider=provider,
+        workflow_driver=InMemoryWorkflowDriver(),
+    )
+    session = rt.create_session(
+        agent_id="coding-agent",
+        release_id="coding-agent-v1",
+        tenant_id="tenant-a",
+    )
+    run = rt.start_run(session_id=session.session_id)
+    unknown_ref = "sandbox://unregistered-provider/retired-sandbox"
+    persisted = rt.store.get_run(run.run_id)
+    assert persisted.sandbox_binding is not None
+    persisted.sandbox_binding.pending_cleanup_refs = [unknown_ref]
+    rt.store.save_run(persisted)
+
+    recovered = rt.cleanup_retired_sandboxes(run.run_id)
+    operation_id = deterministic_cleanup_operation_id(run.run_id, unknown_ref)
+    evidence = [
+        event for event in recovered.recovery_evidence
+        if event["operation_id"] == operation_id
+    ]
+
+    assert recovered.sandbox_binding is not None
+    assert recovered.sandbox_binding.pending_cleanup_refs == [unknown_ref]
+    assert recovered.recovery_state == "unknown"
+    assert [event["outcome"] for event in evidence] == ["blocked"]
+    assert "provider mismatch" in evidence[0]["detail"]
+    assert provider.terminated_ids == []
