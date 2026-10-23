@@ -48,6 +48,12 @@ class KubernetesSandboxProvider:
         self.command_timeout_seconds = float(command_timeout_seconds)
         self._kubectl = kubectl or self._run_kubectl
 
+    def _namespace_for(self, sandbox_id: str) -> str:
+        # Keep the namespace within Kubernetes' DNS-label limit.
+        prefix = self.namespace[:38].rstrip("-")
+        suffix = sandbox_id.rsplit("-", 1)[-1]
+        return f"{prefix}-sbx-{suffix}"
+
     def _run_kubectl(self, args: list[str], *, stdin: str | None = None) -> KubectlResult:
         try:
             result = subprocess.run(
@@ -248,4 +254,18 @@ class KubernetesSandboxProvider:
         sandbox.status = SandboxStatus.TERMINATED
         return sandbox
 
-
+    def is_gone(self, sandbox_id: str) -> bool:
+        """Confirm sandbox namespace absence; ambiguous API errors fail closed."""
+        namespace = self._namespace_for(sandbox_id)
+        result = self._invoke_kubectl(
+            ["get", "namespace", namespace, "-o", "name"]
+        )
+        if result.returncode == 0:
+            return False
+        detail = f"{result.stdout}\n{result.stderr}".lower()
+        if "not found" in detail or "notfound" in detail:
+            return True
+        raise RuntimeError(
+            f"could not independently establish whether sandbox {sandbox_id} is Gone: "
+            f"{result.stderr.strip()}"
+        )
