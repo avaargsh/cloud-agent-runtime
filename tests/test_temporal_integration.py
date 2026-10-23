@@ -318,3 +318,59 @@ def test_run_budget_timeout_is_reconciled_after_temporal_execution_closes(tmp_pa
             store.close()
 
     asyncio.run(scenario())
+
+
+
+def test_temporal_deadline_survives_worker_restart_and_replay() -> None:
+    async def scenario() -> None:
+        async with await WorkflowEnvironment.start_time_skipping() as env:
+            task_queue = f"test-agent-timeout-restart-{uuid4()}"
+            workflow_id = f"agent-run-timeout-restart-{uuid4()}"
+            payload = {
+                "runtime_run_id": "canonical-run-timeout-restart",
+                "session_id": "canonical-session-timeout-restart",
+                "timeout_seconds": 3,
+                "timeout_event_id": "timeout-durable-before-restart",
+            }
+            handle = None
+
+            # Worker A must persist the timer command before shutdown.
+            async with Worker(
+                env.client,
+                task_queue=task_queue,
+                workflows=[AgentRunWorkflow],
+            ):
+                handle = await env.client.start_workflow(
+                    AgentRunWorkflow.run,
+                    payload,
+                    id=workflow_id,
+                    task_queue=task_queue,
+                )
+                state = await handle.query(AgentRunWorkflow.run_state)
+                assert state["phase"] == "running"
+                assert state["terminal"] is False
+                assert handle.id == workflow_id
+
+            # Worker B replays the workflow and its durable timer. No signal or
+            # local process timer is needed to make the timeout terminal.
+            assert handle is not None
+            async with Worker(
+                env.client,
+                task_queue=task_queue,
+                workflows=[AgentRunWorkflow],
+            ):
+                result = await handle.result()
+                assert result["phase"] == "failed"
+                assert result["runtime_run_id"] == payload["runtime_run_id"]
+                assert result["session_id"] == payload["session_id"]
+                assert result["error"] == "run timed out after 3 seconds"
+                assert [
+                    (event["from_phase"], event["to_phase"])
+                    for event in result["transition_events"]
+                ] == [("pending", "running"), ("running", "failed")]
+                assert result["transition_events"][-1]["event_type"] == "run_timed_out"
+                assert result["transition_events"][-1]["event_id"] == (
+                    "timeout-durable-before-restart"
+                )
+
+    asyncio.run(scenario())
