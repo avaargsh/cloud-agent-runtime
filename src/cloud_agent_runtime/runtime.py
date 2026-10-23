@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from uuid import uuid4
 
 from .contracts import (
@@ -672,22 +673,39 @@ class AgentRuntime:
         workflow signal without creating a new Run or changing its identity.
         """
         run = self.store.get_run(run_id)
+        refs = [str(ref) for ref in (evidence_refs or [])]
+        cancellation_metadata = {
+            "terminal_reason": reason,
+            "cancel_event_id": event_id or "",
+            "cancel_evidence_refs": json.dumps(
+                refs, separators=(",", ":"), ensure_ascii=False
+            ),
+        }
+
         if run.status == RunStatus.CANCELLED:
+            # The first durable cancellation request is authoritative. A retry
+            # may redeliver it, but must not silently rewrite its intent.
+            for key, value in cancellation_metadata.items():
+                if run.metadata.get(key) != value:
+                    raise ValueError(
+                        "cancellation retry metadata differs from durable request"
+                    )
             if self.workflow_driver is not None and run.workflow_ref is not None:
                 self.workflow_driver.signal(
                     run.workflow_ref,
                     name="cancel_run",
                     payload={
-                        "event_id": event_id,
-                        "reason": reason,
-                        "evidence_refs": [str(ref) for ref in (evidence_refs or [])],
+                        "event_id": run.metadata.get("cancel_event_id") or None,
+                        "reason": run.metadata["terminal_reason"],
+                        "evidence_refs": json.loads(
+                            run.metadata["cancel_evidence_refs"]
+                        ),
                     },
                 )
             return run
         if run.status in (RunStatus.SUCCEEDED, RunStatus.FAILED):
             raise ValueError(f"terminal run cannot be cancelled: {run.status.value}")
 
-        refs = [str(ref) for ref in (evidence_refs or [])]
         self._transition_run(
             run,
             to_status=RunStatus.CANCELLED,
@@ -695,8 +713,10 @@ class AgentRuntime:
             event_id=event_id,
             evidence_refs=refs,
         )
-        run.evidence_refs.extend(ref for ref in (evidence_refs or []) if ref not in run.evidence_refs)
-        run.metadata = {**dict(run.metadata), "terminal_reason": reason}
+        run.evidence_refs.extend(
+            ref for ref in (evidence_refs or []) if ref not in run.evidence_refs
+        )
+        run.metadata = {**dict(run.metadata), **cancellation_metadata}
         self.store.save_run(run)
 
         if self.workflow_driver is not None and run.workflow_ref is not None:
