@@ -658,6 +658,59 @@ class AgentRuntime:
         self.store.save_session(session)
         return session
 
+    def cancel_run(
+        self,
+        run_id: str,
+        *,
+        reason: str = "cancelled by caller",
+        event_id: str | None = None,
+        evidence_refs: list[EvidenceRef | str] | None = None,
+    ) -> Run:
+        """Persist cancellation before signaling the external workflow.
+
+        Repeating the same cancellation is safe and retries a previously failed
+        workflow signal without creating a new Run or changing its identity.
+        """
+        run = self.store.get_run(run_id)
+        if run.status == RunStatus.CANCELLED:
+            if self.workflow_driver is not None and run.workflow_ref is not None:
+                self.workflow_driver.signal(
+                    run.workflow_ref,
+                    name="cancel_run",
+                    payload={
+                        "event_id": event_id,
+                        "reason": reason,
+                        "evidence_refs": [str(ref) for ref in (evidence_refs or [])],
+                    },
+                )
+            return run
+        if run.status in (RunStatus.SUCCEEDED, RunStatus.FAILED):
+            raise ValueError(f"terminal run cannot be cancelled: {run.status.value}")
+
+        refs = [str(ref) for ref in (evidence_refs or [])]
+        self._transition_run(
+            run,
+            to_status=RunStatus.CANCELLED,
+            event_type="run_cancelled",
+            event_id=event_id,
+            evidence_refs=refs,
+        )
+        run.evidence_refs.extend(ref for ref in (evidence_refs or []) if ref not in run.evidence_refs)
+        run.metadata = {**dict(run.metadata), "terminal_reason": reason}
+        self.store.save_run(run)
+
+        if self.workflow_driver is not None and run.workflow_ref is not None:
+            self.workflow_driver.signal(
+                run.workflow_ref,
+                name="cancel_run",
+                payload={
+                    "event_id": event_id,
+                    "reason": reason,
+                    "evidence_refs": refs,
+                },
+            )
+        return run
+
     def complete_run(
         self,
         run_id: str,
