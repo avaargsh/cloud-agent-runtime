@@ -1,9 +1,11 @@
 import asyncio
 from uuid import uuid4
 
+from temporalio.exceptions import CancelledError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
+from cloud_agent_runtime.temporal_workflow import AgentRunWorkflow
 from tests.fixtures.temporal_timeout_probe import AgentRunTimeoutProbe
 
 
@@ -54,23 +56,22 @@ def test_temporal_workflow_cancel_is_terminal_and_not_success() -> None:
             async with Worker(
                 env.client,
                 task_queue=task_queue,
-                workflows=[AgentRunTimeoutProbe],
+                workflows=[AgentRunWorkflow],
             ):
                 handle = await env.client.start_workflow(
-                    AgentRunTimeoutProbe.run,
+                    AgentRunWorkflow.run,
                     {
                         "runtime_run_id": run_id,
                         "session_id": session_id,
                     },
-                    id=f"cancel-probe-{run_id}",
+                    id=f"agent-run-{run_id}",
                     task_queue=task_queue,
                 )
                 await handle.cancel()
-
                 try:
                     await handle.result()
-                except Exception as exc:
-                    assert "cancel" in type(exc).__name__.lower() or "cancel" in str(exc).lower()
+                except CancelledError:
+                    pass
                 else:
                     raise AssertionError("cancelled workflow unexpectedly returned a success result")
 
