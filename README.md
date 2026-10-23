@@ -133,6 +133,8 @@ python examples/otel_evidence_archive.py
 
 For the Temporal worker and provider-owned durable workflow path, see `docs/temporal-worker.md` and `docs/temporal.md`.
 
+The four independent durability contracts (identity, state, workspace, and execution), event-driven coordination, and the GPU compute handoff boundary are defined in [`docs/durable-persistence-contract.md`](docs/durable-persistence-contract.md). This is a contract and acceptance plan, not a claim that every item is implemented.
+
 ## Status
 
 Public pre-1.0 lifecycle-binding reference. Canonical identity, local and Kubernetes sandbox recovery primitives, a Temporal adapter, OTel-to-Evidence projection, content-addressed EvidenceArchive, S3/MinIO/Ceph-compatible object storage, and policy-digest evidence binding are implemented. Temporal owns durable orchestration and workflow history. PostgreSQL runtime-state persistence, production sandbox isolation, storage-side retention enforcement, warm pools, tenant quotas, and Kubernetes/GPU scheduling integrations remain roadmap work.
