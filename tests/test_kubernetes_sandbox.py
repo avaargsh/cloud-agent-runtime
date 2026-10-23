@@ -29,10 +29,11 @@ class FakeKubectl:
             self.namespace_exists = True
             return KubectlResult(0, "", "")
         if args[:2] == ["apply", "-f"]:
-            assert stdin and '"kind": "Pod"' in stdin
+            assert stdin
             import json
-            pod = json.loads(stdin)["metadata"]["name"]
-            self.pods.add(pod)
+            manifest = json.loads(stdin)
+            if manifest["kind"] == "Pod":
+                self.pods.add(manifest["metadata"]["name"])
             return KubectlResult(0, "", "")
         if "label" in args:
             return KubectlResult(0, "", "")
