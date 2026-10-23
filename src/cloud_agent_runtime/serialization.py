@@ -179,6 +179,7 @@ def run_to_dict(run: Run) -> dict[str, Any]:
             else None
         ),
         "metadata": dict(run.metadata),
+        "transition_events": [dict(event) for event in run.transition_events],
     }
 
 
@@ -221,4 +222,5 @@ def run_from_dict(data: dict[str, Any]) -> Run:
         ],
         budget=Budget(**budget_data) if budget_data is not None else None,
         metadata=dict(data.get("metadata", {})),
+        transition_events=[dict(event) for event in data.get("transition_events", [])],
     )
