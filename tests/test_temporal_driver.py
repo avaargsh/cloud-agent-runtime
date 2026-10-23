@@ -213,3 +213,27 @@ def test_temporal_driver_reconcile_start_rejects_wrong_operation_identity() -> N
         assert client.started == []
 
     asyncio.run(scenario())
+
+
+def test_temporal_driver_reconcile_start_fails_closed_when_describe_has_no_status() -> None:
+    async def scenario():
+        client = FakeClient()
+        client.handle.status = None
+        driver = TemporalWorkflowDriver(client=client, task_queue="agent-runs")
+        from cloud_agent_runtime.temporal_driver import deterministic_start_operation_id
+
+        with pytest.raises(TemporalWorkflowConflict, match="status unavailable"):
+            # A fake Describe response with no status is ambiguity, not proof
+            # of absence, so this method must never call start_workflow.
+            client.handle.describe = async_no_status
+            await driver.reconcile_start(
+                runtime_run_id="run-unknown",
+                session_id="session-unknown",
+                operation_id=deterministic_start_operation_id("run-unknown"),
+            )
+        assert client.started == []
+
+    async def async_no_status():
+        return {"status": None}
+
+    asyncio.run(scenario())
