@@ -400,3 +400,21 @@ def test_same_tenant_agent_mismatch_and_mutated_run_cannot_rebind_workspace():
     assert identity.workspace_ref == canonical.sandbox_ref
     assert identity.sandbox_id == canonical.sandbox_binding.sandbox_id
 
+def test_inactive_session_cannot_rebind_or_resume_a_run():
+    _, runtime, session, _, _, _, secure, principal = make_boundary()
+    run = secure.start_run(principal, session_id=session.session_id)
+    canonical_workspace = runtime.store.get_run(run.run_id).sandbox_ref
+    runtime.pause_session(session.session_id)
+
+    for operation in (
+        lambda: secure.rebind_run_sandbox(principal, run_id=run.run_id),
+        lambda: secure.resume_run(principal, run_id=run.run_id),
+    ):
+        try:
+            operation()
+        except IdentityAuthorizationError:
+            pass
+        else:
+            raise AssertionError("inactive Session allowed Run recovery")
+    assert runtime.store.get_run(run.run_id).sandbox_ref == canonical_workspace
+
