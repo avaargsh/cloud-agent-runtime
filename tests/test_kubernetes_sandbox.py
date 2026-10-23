@@ -44,6 +44,8 @@ class FakeKubectl:
             elif "namespace" in args:
                 self.namespace_exists = False
                 self.pods.clear()
+            elif "networkpolicy" in args:
+                return KubectlResult(0, "", "")
             return KubectlResult(0, "", "")
         return KubectlResult(1, "", "unexpected kubectl call")
 
