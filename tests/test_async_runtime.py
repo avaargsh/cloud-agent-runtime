@@ -260,3 +260,61 @@ def test_async_approval_resolution_retry_redelivers_same_signal() -> None:
         }
 
     asyncio.run(scenario())
+
+
+def test_run_timeout_budget_is_forwarded_to_workflow_driver():
+    async def scenario():
+        from cloud_agent_runtime import AsyncAgentRuntime, Budget, InMemoryAsyncWorkflowDriver, InMemorySandboxProvider
+        from cloud_agent_runtime.store import InMemoryStore
+
+        driver = InMemoryAsyncWorkflowDriver()
+        runtime = AsyncAgentRuntime(
+            store=InMemoryStore(),
+            sandbox_provider=InMemorySandboxProvider(),
+            workflow_driver=driver,
+        )
+        session = runtime.create_session(
+            agent_id="sre-agent",
+            release_id="release-v1",
+            tenant_id="tenant-a",
+        )
+        run = await runtime.start_run(
+            session_id=session.session_id,
+            budget=Budget(max_wall_seconds=17),
+        )
+        assert run.workflow_ref is not None
+        assert driver.started == [{
+            "runtime_run_id": run.run_id,
+            "session_id": session.session_id,
+            "timeout_seconds": 17.0,
+        }]
+
+    asyncio.run(scenario())
+
+
+def test_run_timeout_budget_rejects_invalid_values_before_creating_run():
+    async def scenario():
+        from cloud_agent_runtime import AsyncAgentRuntime, Budget, InMemoryAsyncWorkflowDriver, InMemorySandboxProvider
+        from cloud_agent_runtime.store import InMemoryStore
+
+        driver = InMemoryAsyncWorkflowDriver()
+        runtime = AsyncAgentRuntime(
+            store=InMemoryStore(),
+            sandbox_provider=InMemorySandboxProvider(),
+            workflow_driver=driver,
+        )
+        session = runtime.create_session(
+            agent_id="sre-agent",
+            release_id="release-v1",
+            tenant_id="tenant-a",
+        )
+        for invalid in (0, -1, True):
+            with pytest.raises(ValueError, match="max_wall_seconds"):
+                await runtime.start_run(
+                    session_id=session.session_id,
+                    budget=Budget(max_wall_seconds=invalid),
+                )
+        assert driver.started == []
+        assert runtime._sandboxes == {}
+
+    asyncio.run(scenario())
