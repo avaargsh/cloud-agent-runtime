@@ -40,6 +40,9 @@
 - [x] worker CLI
 - [x] Temporal test environment integration
 - [x] Worker + Signal + Query + Result integration test
+- [ ] P0: live Temporal start lost-ACK + caller SIGKILL + restart reconciliation
+- [ ] P0: live provider-side-effect lost-ACK and cleanup retry evidence
+- [ ] P0: pause/resume persistence-failure recovery matrix
 
 ## v0.4 — Kubernetes scale
 - [ ] warm sandbox pool
@@ -47,3 +50,7 @@
 - [ ] Kueue / Volcano integration
 - [ ] GPU / DRA bindings
 - [ ] self-hosted vLLM / SGLang model provider
+
+## P0 Recovery Gate
+
+Do not expand the runtime architecture or begin P1/P2 work until the outstanding rows in [the recovery acceptance matrix](docs/recovery-acceptance.md) have exact-head evidence. In-memory and unit-test success are not a substitute for the live process/provider tests.
