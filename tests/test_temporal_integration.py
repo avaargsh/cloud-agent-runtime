@@ -70,5 +70,18 @@ def test_temporal_worker_signal_round_trip() -> None:
                     "evidence://aiops/e-1",
                     "evidence://aiops/e-post",
                 ]
+                transitions = result["transition_events"]
+                assert [
+                    (event["from_phase"], event["to_phase"])
+                    for event in transitions
+                ] == [
+                    ("pending", "running"),
+                    ("running", "succeeded"),
+                ]
+                assert all(
+                    event["runtime_run_id"] == "run-123"
+                    and event["session_id"] == "session-456"
+                    for event in transitions
+                )
 
     asyncio.run(scenario())
