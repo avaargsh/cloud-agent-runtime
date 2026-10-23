@@ -11,6 +11,7 @@ from cloud_agent_runtime.store import InMemoryStore
 
 class FailOnceTerminateProvider(InMemorySandboxProvider):
     def __init__(self) -> None:
+        super().__init__()
         self.failures_remaining = 1
 
     def terminate(self, sandbox):
@@ -27,6 +28,7 @@ class FailingResumeProvider(InMemorySandboxProvider):
 
 class CountingSandboxProvider(InMemorySandboxProvider):
     def __init__(self) -> None:
+        super().__init__()
         self.allocated_ids: list[str] = []
         self.terminated_ids: list[str] = []
 
@@ -287,6 +289,7 @@ class FailingWorkflowDriver:
 
 class TrackingProvider(InMemorySandboxProvider):
     def __init__(self):
+        super().__init__()
         self.allocated = []
         self.terminated = []
 
