@@ -502,6 +502,17 @@ def test_temporal_worker_process_sigkill_restarts_same_workflow_identity(tmp_pat
                     id=workflow_id,
                     task_queue=task_queue,
                 )
+                # Do not confuse a pre-initialization signal with a
+                # Worker-restart recovery test. First prove the workflow's
+                # start transition is durable, then move it to Waiting.
+                started = await wait_for_state(
+                    handle,
+                    lambda state: state.get("phase") == "running",
+                    worker=worker_a,
+                    log_path=worker_a_log,
+                )
+                assert started["runtime_run_id"] == runtime_run_id
+                assert started["session_id"] == session_id
                 await handle.signal(
                     AgentRunWorkflow.wait_for_input,
                     {"event_id": "durable-wait-before-sigkill"},
