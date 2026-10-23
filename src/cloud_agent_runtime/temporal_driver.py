@@ -28,9 +28,7 @@ def _workflow_status_name(status: Any) -> str:
     if status is None:
         return ""
     name = getattr(status, "name", None)
-    if isinstance(name, str) and name:
-        return name.upper()
-    value = str(status).upper()
+    value = name.upper() if isinstance(name, str) and name else str(status).upper()
     if "." in value:
         value = value.rsplit(".", 1)[-1]
     if value.startswith("WORKFLOW_EXECUTION_STATUS_"):
@@ -232,10 +230,60 @@ class TemporalWorkflowDriver:
                 workflow.workflow_id,
             )
 
+        if name == "run_state":
+            # A terminal execution no longer needs a live Worker to serve a
+            # query. Read its persisted result directly, avoiding a query that
+            # can wait on a workflow task which will never be polled again.
+            try:
+                description = await handle.describe()
+                status = getattr(description, "status", None)
+                if isinstance(description, dict):
+                    status = description.get("status")
+                if _workflow_is_terminal(status):
+                    result = await handle.result()
+                    if isinstance(result, dict) and "phase" in result:
+                        phase = str(result["phase"])
+                        return {
+                            **result,
+                            "paused": phase == "paused",
+                            "terminal": True,
+                            "approval_events": list(
+                                result.get("approval_events", [])
+                            ),
+                        }
+            except Exception:
+                # The live query below may still work if describe/result is
+                # temporarily unavailable or the execution is nonterminal.
+                pass
+
         try:
             if args is None:
                 return await handle.query(name)
             return await handle.query(name, args)
+        except Exception:
+            if name != "run_state":
+                raise
+
+            # Close can race the first describe/query. On failure, re-check the
+            # durable execution state before deciding whether to propagate.
+            description = await handle.describe()
+            status = getattr(description, "status", None)
+            if isinstance(description, dict):
+                status = description.get("status")
+            if not _workflow_is_terminal(status):
+                raise
+
+            result = await handle.result()
+            if not isinstance(result, dict) or "phase" not in result:
+                raise
+            phase = str(result["phase"])
+            return {
+                **result,
+                "paused": phase == "paused",
+                "terminal": True,
+                "approval_events": list(result.get("approval_events", [])),
+            }
+
         except Exception:
             if name != "run_state":
                 raise
