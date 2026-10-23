@@ -103,7 +103,7 @@ def test_delete_timeout_is_ambiguous_and_retry_uses_same_sandbox_id():
 
     kubectl = TimeoutAfterDelete()
     provider = KubernetesSandboxProvider(
-        kubectl_timeout_seconds=0.25,
+        command_timeout_seconds=0.25,
         kubectl=kubectl,
     )
     sandbox = provider.bind(provider.allocate(), session_id="session-stable")
