@@ -143,9 +143,10 @@ def test_sqlite_restart_preserves_binding_and_recovers_same_run(tmp_path):
     first_store.close()
 
     second_store = SQLiteStore(db)
+    restarted_provider = RestartableCleanupProvider(backend=provider.backend)
     restarted = AgentRuntime(
         store=second_store,
-        sandbox_provider=provider,
+        sandbox_provider=restarted_provider,
         workflow_driver=workflow,
     )
     recovered_before = restarted.store.get_run(original_run_id)
@@ -1133,23 +1134,38 @@ def test_cancel_does_not_fail_for_external_sandbox_reference():
 
 
 
-class RestartableCleanupProvider(InMemorySandboxProvider):
-    """Provider fake whose cleanup fault/state survives Runtime reconstruction."""
+class RestartableCleanupBackend:
+    """Shared external provider state, independent of any adapter instance."""
 
     def __init__(self):
         self.allocated_ids = []
         self.terminated_ids = []
         self.failures_remaining = 1
 
+
+class RestartableCleanupProvider(InMemorySandboxProvider):
+    """New adapter instances act on the same simulated external provider."""
+
+    def __init__(self, backend=None):
+        self.backend = backend if backend is not None else RestartableCleanupBackend()
+
+    @property
+    def allocated_ids(self):
+        return self.backend.allocated_ids
+
+    @property
+    def terminated_ids(self):
+        return self.backend.terminated_ids
+
     def allocate(self):
         sandbox = super().allocate()
-        self.allocated_ids.append(sandbox.sandbox_id)
+        self.backend.allocated_ids.append(sandbox.sandbox_id)
         return sandbox
 
     def terminate(self, sandbox):
-        self.terminated_ids.append(sandbox.sandbox_id)
-        if self.failures_remaining:
-            self.failures_remaining -= 1
+        self.backend.terminated_ids.append(sandbox.sandbox_id)
+        if self.backend.failures_remaining:
+            self.backend.failures_remaining -= 1
             raise RuntimeError("simulated cleanup outage across runtime restart")
         return super().terminate(sandbox)
 
