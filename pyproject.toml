@@ -18,6 +18,7 @@ dependencies = []
 dev = [
   "pytest>=8.0",
   "temporalio>=1.33,<2",
+  "hpack>=4.0,<5",
 ]
 temporal = [
   "temporalio>=1.33,<2",
