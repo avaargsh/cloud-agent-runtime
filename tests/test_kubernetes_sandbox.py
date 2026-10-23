@@ -103,7 +103,9 @@ def test_terminate_is_orphan_cleanup_safe():
     provider.terminate(sandbox)
 
     delete_calls = [args for args, _ in kubectl.calls if "delete" in args]
-    assert len(delete_calls) == 2
+    assert [args[args.index("delete") + 1] for args in delete_calls] == [
+        "pod", "networkpolicy", "namespace", "pod", "networkpolicy", "namespace"
+    ]
     assert all("--ignore-not-found=true" in args for args in delete_calls)
 
 
@@ -146,7 +148,9 @@ def test_delete_timeout_is_ambiguous_and_retry_uses_same_sandbox_id():
     assert terminated.sandbox_id == original_id
     assert terminated.status.value == "terminated"
     delete_calls = [args for args, _ in kubectl.calls if "delete" in args]
-    assert len(delete_calls) == 2
+    assert [args[args.index("delete") + 1] for args in delete_calls] == [
+        "pod", "pod", "networkpolicy", "namespace"
+    ]
     assert all("--ignore-not-found=true" in args for args in delete_calls)
 
 
