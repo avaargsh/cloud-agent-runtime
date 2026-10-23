@@ -262,6 +262,8 @@ def test_introspection_fails_closed_on_inactive_wrong_audience_or_scope():
             "audience": "https://api.github.com",
             "scopes": ["github:read"],
             "expires_at": 10_020.0,
+            "sandbox_id": "sandbox-a",
+            "sandbox_revision": 3,
             "workload_identity": identity_payload(),
         }
     }
@@ -277,6 +279,8 @@ def test_introspection_fails_closed_on_inactive_wrong_audience_or_scope():
             "audience": "https://evil.example",
             "scopes": ["github:read"],
             "expires_at": 10_020.0,
+            "sandbox_id": "sandbox-a",
+            "sandbox_revision": 3,
             "workload_identity": identity_payload(),
         }, "https://evil.example", ()),
         ({
@@ -284,6 +288,8 @@ def test_introspection_fails_closed_on_inactive_wrong_audience_or_scope():
             "audience": "https://api.github.com",
             "scopes": ["github:read"],
             "expires_at": 10_020.0,
+            "sandbox_id": "sandbox-a",
+            "sandbox_revision": 3,
             "workload_identity": identity_payload(),
         }, "https://api.github.com", ("github:write",)),
     ):
