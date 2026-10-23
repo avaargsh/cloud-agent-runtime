@@ -15,6 +15,7 @@ from cloud_agent_runtime.identity import (
     IdentityAuthorizationError,
     InMemoryApprovalResolver,
     InMemoryCredentialBroker,
+    WorkloadIdentity,
 )
 
 
@@ -417,4 +418,47 @@ def test_inactive_session_cannot_rebind_or_resume_a_run():
         else:
             raise AssertionError("inactive Session allowed Run recovery")
     assert runtime.store.get_run(run.run_id).sandbox_ref == canonical_workspace
+
+def test_unknown_scope_verbs_require_approval_in_reference_broker():
+    clock = FakeClock()
+    binding = CredentialBinding(
+        binding_id="github-owner",
+        capability="github",
+        audience="https://api.github.com",
+        allowed_scopes=("github:owner",),
+        max_ttl_seconds=30,
+    )
+    identity = WorkloadIdentity(
+        issuer="runtime-test",
+        subject="run:run-unknown-scope",
+        tenant_id="tenant-a",
+        agent_id="agent-a",
+        release_id="release-a",
+        session_id="session-a",
+        run_id="run-unknown-scope",
+        sandbox_id="sandbox-a",
+        workspace_ref="sandbox://kubernetes/sandbox-a",
+        binding_id=binding.binding_id,
+        capability=binding.capability,
+        audience=binding.audience,
+        allowed_scopes=("github:owner",),
+        issued_at=clock(),
+        expires_at=clock() + 60,
+    )
+    broker = InMemoryCredentialBroker(clock=clock)
+    try:
+        broker.issue(
+            identity,
+            binding,
+            CredentialRequest(
+                request_id="unknown-owner-scope",
+                binding_id=binding.binding_id,
+                scopes=("github:owner",),
+                ttl_seconds=20,
+            ),
+        )
+    except IdentityAuthorizationError:
+        pass
+    else:
+        raise AssertionError("unknown non-read scope bypassed the approval gate")
 
