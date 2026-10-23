@@ -927,3 +927,76 @@ def test_cancel_signal_failure_recovers_from_durable_intent(tmp_path):
         )
     assert len(workflow.signals) == 2
     store.close()
+
+
+class FailOnceCountingSandboxProvider(FailOnceTerminateProvider):
+    def __init__(self):
+        super().__init__()
+        self.terminated_ids = []
+
+    def terminate(self, sandbox):
+        self.terminated_ids.append(sandbox.sandbox_id)
+        return super().terminate(sandbox)
+
+
+def test_cancel_cleans_current_sandbox_and_drops_terminal_cache():
+    provider = CountingSandboxProvider()
+    runtime = AgentRuntime(
+        sandbox_provider=provider,
+        workflow_driver=InMemoryWorkflowDriver(),
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+    sandbox_id = run.sandbox_binding.sandbox_id
+
+    cancelled = runtime.cancel_run(
+        run.run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-with-cleanup",
+    )
+
+    assert cancelled.status.value == "cancelled"
+    assert cancelled.sandbox_binding is not None
+    assert cancelled.sandbox_binding.pending_cleanup_refs == []
+    assert provider.terminated_ids.count(sandbox_id) == 1
+    assert run.run_id not in runtime._sandboxes
+
+
+def test_cancel_cleanup_failure_remains_durable_and_retryable():
+    provider = FailOnceCountingSandboxProvider()
+    runtime = AgentRuntime(
+        sandbox_provider=provider,
+        workflow_driver=InMemoryWorkflowDriver(),
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+    sandbox_id = run.sandbox_binding.sandbox_id
+
+    first = runtime.cancel_run(
+        run.run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-cleanup-retry",
+    )
+    assert first.status.value == "cancelled"
+    assert first.sandbox_binding is not None
+    assert first.sandbox_binding.pending_cleanup_refs == [run.sandbox_ref]
+    assert provider.terminated_ids == [sandbox_id]
+
+    replay = runtime.cancel_run(
+        run.run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-cleanup-retry",
+    )
+    assert replay.status.value == "cancelled"
+    assert replay.sandbox_binding is not None
+    assert replay.sandbox_binding.pending_cleanup_refs == []
+    assert provider.terminated_ids == [sandbox_id, sandbox_id]
+    assert run.run_id not in runtime._sandboxes
