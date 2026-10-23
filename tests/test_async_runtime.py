@@ -62,7 +62,7 @@ def test_async_runtime_starts_workflow_and_signals_approval() -> None:
     asyncio.run(scenario())
 
 
-def test_async_workflow_start_failure_marks_run_failed() -> None:
+def test_async_workflow_start_failure_preserves_unknown_outcome() -> None:
     class FailingDriver:
         name = "failing"
 
@@ -398,9 +398,15 @@ def test_uncertain_run_reconciliation_survives_sqlite_store_reconstruction(tmp_p
             tenant_id="tenant-a",
         )
 
+        # This ID belongs to the caller before the first request. Restart
+        # recovery must use this same identity rather than discovering a new
+        # Run ID and creating a new operation.
+        original_run_id = "run-stable-123"
         with pytest.raises(RuntimeError, match="lost acknowledgement"):
-            await runtime.start_run(session_id=session.session_id)
-        original_run_id = next(iter(store_before_restart._connection.execute("SELECT run_id FROM runs").fetchall()))[0]
+            await runtime.start_run(
+                session_id=session.session_id,
+                run_id=original_run_id,
+            )
         store_before_restart.close()
 
         store_after_restart = SQLiteStore(db_path)
