@@ -15,9 +15,9 @@ Scope: Issue #30 only. Do not use this matrix to claim production acceptance fro
 
 | ID | Scenario | Required assertion | Status / evidence |
 |---|---|---|---|
-| R01 | Run is durable; StartWorkflow request is forwarded; ACK frames dropped; caller is SIGKILLed | After a new process opens the same SQLite store, one original Run is attached to the original Workflow ID; provider history shows one start event; duplicate start is rejected | **PENDING exact-head CI** on the current PR #41 head `34f14e4ac710e5e32fadb8f52598fb03701fbe25`; source test is `tests/test_temporal_ack_drop_proxy.py`. Do not count as PASS until artifact exists. |
-| R02 | ACK ambiguous; reopen same SQLite state | Persisted Run ID and start operation ID remain identical; recovery attaches by deterministic ID | **PENDING exact-head CI** on `3c3860ff1e78d9018ad808080705f68236cc4f55`. |
-| R03 | Provider cannot verify status after ACK loss | Persist `unknown`; do not issue another Workflow start | **PENDING exact-head CI** on `3c3860ff1e78d9018ad808080705f68236cc4f55`. |
+| R01 | Run is durable; StartWorkflow request is forwarded; ACK frames dropped; caller is SIGKILLed | After a new process opens the same SQLite store, one original Run is attached to the original Workflow ID; provider history shows one start event; duplicate start is rejected | **PENDING exact-head CI** on the current PR #41 head `6d150174bf985967aeadd41ac9c1ecc22b6ab60a`; source test is `tests/test_temporal_ack_drop_proxy.py`. Do not count as PASS until artifact exists. |
+| R02 | ACK ambiguous; reopen same SQLite state | Persisted Run ID and start operation ID remain identical; recovery attaches by deterministic ID | **PENDING exact-head CI** on `6d150174bf985967aeadd41ac9c1ecc22b6ab60a`. |
+| R03 | Provider cannot verify status after ACK loss | Persist `unknown`; do not issue another Workflow start | **PENDING exact-head CI** on `6d150174bf985967aeadd41ac9c1ecc22b6ab60a`. |
 | R04 | Duplicate attach to a running workflow | Return the same deterministic Workflow ID and execution identity | **PENDING exact-head CI**. |
 | R05 | Deterministic ID already refers to a terminal workflow | Fail closed; do not report a terminal workflow as running | **PENDING exact-head CI**. |
 | R06 | Provider executes a side effect but ACK is lost | Same stable provider operation identity on retry; authoritative provider inspection resolves outcome | **NOT RUN** — no real external side-effect provider fixture/service is available in this CI report. |
@@ -34,14 +34,14 @@ Scope: Issue #30 only. Do not use this matrix to claim production acceptance fro
 
 | Commit SHA | Standard full pytest | Dedicated P0 recovery tests | Worker SIGKILL recovery | Temporal Start ACK-drop proxy | Live external provider side-effect / cleanup ACK loss |
 |---|---|---|---|---|---|
-| `3c3860ff1e78d9018ad808080705f68236cc4f55` (PR #41 current head at the time of inspection) | **NO RUN RECORDED** for this SHA | **NO RUN RECORDED** for this SHA | Included in dedicated test command; exact-head result not recorded | Included in dedicated test command; exact-head result not recorded | **NOT RUN** |
+| `6d150174bf985967aeadd41ac9c1ecc22b6ab60a` (PR #41 current head at the time of inspection) | **NO RUN RECORDED** for this SHA | **NO RUN RECORDED** for this SHA | Included in dedicated test command; exact-head result not recorded | Included in dedicated test command; exact-head result not recorded | **NOT RUN** |
 | `59966c9503019552fea39f655bf8fc6f0b4deca5` (PR #46 current head at inspection) | **FAIL**, [run 39955957118](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39955957118), 148 passed / 1 failed / 1 skipped | Not the same test scope | **FAIL**, same run; see failure above | **NOT RUN** in #46 test command | kind cleanup workflow was still in progress at inspection; production provider **NOT RUN** |
 | `65f3329e9edc8ba91b404babeab21b78714c84b6` (historical PR #41 head) | Historical current-base blocker noted in comments; do not substitute for current head | **PASS**, [run 39952876316](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39952876316) | The separate caller SIGKILL + SQLite reopen test passed in the focused run | **NOT RUN** at that revision | **NOT RUN** |
 | `972f5314927131c6c8b5d402bc6305e7942d8a53` (older historical revision) | **BLOCKED** at that revision by missing source modules; subsequent PR #45 restored those modules | Historical focused workflow passed; not a current-head result | **NOT RUN** | **NOT RUN** | **NOT RUN** |
 
 ### Historical evidence is not current-head evidence
 
-Earlier successful runs on older PR #41 commits (including [39952876316](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39952876316)) are historical evidence only. As of inspection, GitHub Actions returned no workflow run associated with PR #41 current head `3c3860ff1e78d9018ad808080705f68236cc4f55`. Do not promote an older green check to current-head PASS.
+Earlier successful runs on older PR #41 commits (including [39952876316](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39952876316)) are historical evidence only. As of inspection, GitHub Actions returned no workflow run associated with PR #41 current head `6d150174bf985967aeadd41ac9c1ecc22b6ab60a`. Do not promote an older green check to current-head PASS.
 
 ## Required ACK-drop experiment
 
@@ -73,7 +73,14 @@ Issue #30 stays open until the current PR-head matrix is green and live-provider
 
 ## Ledger update after documentation/workflow correction
 
-- Updated recovery report blob SHA: `45fed897ff7ba4ce9a44e0e76191686593200328`.
-- Updated focused workflow blob SHA: `ef0249fa26e081e55ffc3402cbdeefa6dc58124b`.
-- The commit created by these sequential edits is `34f14e4ac710e5e32fadb8f52598fb03701fbe25`; fresh exact-head CI is required and had not appeared at the time of this write.
+- Updated recovery report blob SHA before final ledger synchronization: `45fed897ff7ba4ce9a44e0e76191686593200328`.
+- Updated focused workflow blob SHA before final ledger synchronization: `ef0249fa26e081e55ffc3402cbdeefa6dc58124b`.
+- The commit created by these sequential edits is `6d150174bf985967aeadd41ac9c1ecc22b6ab60a`; fresh exact-head CI is required and had not appeared at the time of this write.
 - PR #46 Worker A SIGKILL / Worker B replay test failure remains independently recorded on `59966c9503019552fea39f655bf8fc6f0b4deca5`. The test currently never transitions from `running` to the awaited `waiting` state before SIGKILL. It is a failing test, not accepted recovery evidence.
+
+
+## Follow-up inspection — head `6d150174bf985967aeadd41ac9c1ecc22b6ab60a`
+
+- PR #41 description was synchronized to this head and reiterates that its TCP proxy test needs exact-head evidence.
+- No P0-focused workflow run or status check was returned for this exact SHA at inspection time. This is **NO RUN RECORDED**, not PASS or FAIL.
+- Historical green run `39952876316` is on SHA `65f3329e9edc8ba91b404babeab21b78714c84b6` and is not current-head proof.
