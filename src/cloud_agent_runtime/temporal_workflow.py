@@ -10,7 +10,7 @@ from temporalio import workflow
 class AgentRunWorkflowState:
     runtime_run_id: str
     session_id: str
-    phase: str = "running"
+    phase: str = "pending"
     paused: bool = False
     terminal: bool = False
     approval_events: list[dict[str, Any]] = field(
@@ -80,6 +80,15 @@ class AgentRunWorkflow:
             ),
             session_id=str(payload["session_id"]),
         )
+        self._transition(
+            to_phase="running",
+            event_type="run_started",
+            event_id=str(payload.get("event_id") or "") or None,
+            evidence_refs=list(payload.get("evidence_refs", [])),
+        )
+        for ref in payload.get("evidence_refs", []):
+            if ref not in self._state.evidence_refs:
+                self._state.evidence_refs.append(ref)
 
         await workflow.wait_condition(
             lambda: (
@@ -158,6 +167,21 @@ class AgentRunWorkflow:
                 evidence_refs=list(event.get("evidence_refs", [])),
             )
 
+    @workflow.signal(name="wait_for_input")
+    def wait_for_input(self, payload: dict[str, Any] | None = None) -> None:
+        if self._state is None or self._state.terminal:
+            return
+        event = payload or {}
+        self._transition(
+            to_phase="waiting",
+            event_type="wait_for_input",
+            event_id=str(event.get("event_id") or "") or None,
+            evidence_refs=list(event.get("evidence_refs", [])),
+        )
+        for ref in event.get("evidence_refs", []):
+            if ref not in self._state.evidence_refs:
+                self._state.evidence_refs.append(ref)
+
     @workflow.signal(name="pause_run")
     def pause_run(
         self,
@@ -165,8 +189,17 @@ class AgentRunWorkflow:
     ) -> None:
         if self._state is None or self._state.terminal:
             return
+        event = payload or {}
         self._state.paused = True
-        self._transition(to_phase="paused", event_type="pause_run")
+        self._transition(
+            to_phase="paused",
+            event_type="pause_run",
+            event_id=str(event.get("event_id") or "") or None,
+            evidence_refs=list(event.get("evidence_refs", [])),
+        )
+        for ref in event.get("evidence_refs", []):
+            if ref not in self._state.evidence_refs:
+                self._state.evidence_refs.append(ref)
 
     @workflow.signal(name="resume_run")
     def resume_run(
@@ -175,8 +208,17 @@ class AgentRunWorkflow:
     ) -> None:
         if self._state is None or self._state.terminal:
             return
+        event = payload or {}
         self._state.paused = False
-        self._transition(to_phase="running", event_type="resume_run")
+        self._transition(
+            to_phase="running",
+            event_type="resume_run",
+            event_id=str(event.get("event_id") or "") or None,
+            evidence_refs=list(event.get("evidence_refs", [])),
+        )
+        for ref in event.get("evidence_refs", []):
+            if ref not in self._state.evidence_refs:
+                self._state.evidence_refs.append(ref)
 
     @workflow.signal(name="complete_run")
     def complete_run(
