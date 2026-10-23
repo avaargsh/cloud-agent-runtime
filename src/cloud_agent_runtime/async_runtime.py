@@ -52,6 +52,14 @@ class AsyncAgentRuntime(AgentRuntime):
         sandbox_ref: str | None = None,
         budget: Budget | None = None,
     ) -> Run:
+        max_wall_seconds = budget.max_wall_seconds if budget is not None else None
+        if max_wall_seconds is not None and (
+            isinstance(max_wall_seconds, bool)
+            or not isinstance(max_wall_seconds, int)
+            or max_wall_seconds <= 0
+        ):
+            raise ValueError("budget.max_wall_seconds must be a positive integer")
+
         # super().start_run persists the canonical Run and Sandbox binding
         # before this async workflow provider creates an external side effect.
         run = super().start_run(
@@ -65,6 +73,11 @@ class AsyncAgentRuntime(AgentRuntime):
                 await self.async_workflow_driver.start_run(
                     runtime_run_id=run.run_id,
                     session_id=session_id,
+                    **(
+                        {"timeout_seconds": float(max_wall_seconds)}
+                        if max_wall_seconds is not None
+                        else {}
+                    ),
                 )
             )
         except Exception:
