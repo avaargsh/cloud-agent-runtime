@@ -4,26 +4,13 @@ import argparse
 import asyncio
 import json
 import os
-import sqlite3
 from pathlib import Path
 from typing import Any
 
-from .models import Run, RunStatus
-from .serialization import run_from_dict, run_to_dict, session_from_dict, session_to_dict
-from .store import SQLiteStore
+from temporalio.client import Client
+from temporalio.exceptions import WorkflowAlreadyStartedError
+
 from .temporal_driver import TemporalWorkflowDriver, deterministic_start_operation_id
-from .async_runtime import AsyncAgentRuntime
-from .sandbox import InMemorySandboxProvider
-
-
-class DurableSQLiteStore(SQLiteStore):
-    """Test-only SQLite-backed Run/Session store exposing small CLI persistence ops."""
-
-    def save_session(self, session):
-        super().save_session(session)
-
-    def get_session(self, session_id):
-        return super().get_session(session_id)
 
 
 def _write_record(path: Path, record: dict[str, Any]) -> None:
@@ -37,23 +24,16 @@ def _read_record(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
-async def _connect_driver(args):
-    return await TemporalWorkflowDriver.connect(
-        args.temporal_address,
-        task_queue=args.task_queue,
-        namespace=args.namespace,
-    )
-
-
 async def _start_intent(args) -> None:
-    """Persist canonical Run intent, then request Temporal start, then exit immediately."""
+    """Persist a stable intent before making the request that the proxy may ACK-drop."""
     run_id = args.run_id
     operation_id = deterministic_start_operation_id(run_id)
     workflow_id = f"agent-run-{run_id}"
+    path = Path(args.state_file)
     record = {
         "run_id": run_id,
         "session_id": args.session_id,
-        "status": RunStatus.RUNNING.value,
+        "status": "running",
         "workflow_id": workflow_id,
         "start_operation_id": operation_id,
         "recovery_state": "start_pending",
@@ -61,19 +41,47 @@ async def _start_intent(args) -> None:
             "operation_id": operation_id,
             "outcome": "intent_persisted",
             "attempt": 0,
-            "detail": "caller process persisted canonical identity before Temporal start",
+            "detail": "fsynced intent written before Temporal start call",
         }],
     }
-    _write_record(Path(args.state_file), record)
+    _write_record(path, record)
 
-    driver = await _connect_driver(args)
+    # fsync parent directory and state file so a SIGKILL/reboot test does not
+    # accidentally test page-cache luck rather than persisted intent.
+    with path.open("rb") as persisted:
+        os.fsync(persisted.fileno())
     try:
-        # This branch is for process-level acceptance. A proxy can inject
-        # RST after forwarding StartWorkflow to Temporal but before response.
-        ref = await driver.start_run(
-            runtime_run_id=run_id,
-            session_id=args.session_id,
-        )
+        directory_fd = os.open(str(path.parent), os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except (AttributeError, OSError):
+        pass
+
+    driver = await TemporalWorkflowDriver.connect(
+        args.temporal_address,
+        task_queue=args.task_queue,
+        namespace=args.namespace,
+    )
+    try:
+        # Configure TCP proxy fault injection to forward the StartWorkflow
+        # request and drop its response. The helper treats all transport errors
+        # as ambiguous; it must not overwrite the intent as FAILED.
+        try:
+            ref = await driver.start_run(runtime_run_id=run_id, session_id=args.session_id)
+        except Exception as exc:
+            record["recovery_state"] = "unknown"
+            record["events"].append({
+                "operation_id": operation_id,
+                "outcome": "unknown",
+                "attempt": 1,
+                "detail": f"caller received no definitive start ACK: {type(exc).__name__}: {exc}",
+            })
+            _write_record(path, record)
+            print(json.dumps({"phase": "unknown", **record}, sort_keys=True))
+            raise
+
         record["workflow_ref"] = {
             "provider": ref.provider,
             "workflow_id": ref.workflow_id,
@@ -86,7 +94,7 @@ async def _start_intent(args) -> None:
             "attempt": 1,
             "detail": f"workflow_id={ref.workflow_id}; temporal_run_id={ref.run_id}",
         })
-        _write_record(Path(args.state_file), record)
+        _write_record(path, record)
         print(json.dumps({"phase": "acknowledged", **record}, sort_keys=True))
     finally:
         close = getattr(driver.client, "close", None)
@@ -97,36 +105,46 @@ async def _start_intent(args) -> None:
 
 
 async def _reconcile(args) -> None:
-    """Reattach to a confirmed existing workflow. Never starts an absent/unknown workflow."""
-    state_path = Path(args.state_file)
-    record = _read_record(state_path)
+    path = Path(args.state_file)
+    record = _read_record(path)
     run_id = str(record["run_id"])
     operation_id = deterministic_start_operation_id(run_id)
     if record.get("start_operation_id") != operation_id:
         raise RuntimeError("persisted start operation identity mismatch")
 
-    driver = await _connect_driver(args)
+    driver = await TemporalWorkflowDriver.connect(
+        args.temporal_address,
+        task_queue=args.task_queue,
+        namespace=args.namespace,
+    )
     try:
-        ref = await driver.reconcile_start(
-            runtime_run_id=run_id,
-            session_id=str(record["session_id"]),
-            operation_id=operation_id,
-        )
-        record.setdefault("events", []).append({
-            "operation_id": operation_id,
-            "outcome": "unknown",
-            "attempt": len(record.get("events", [])),
-            "detail": "restart process began reconciliation without assuming the previous ACK outcome",
-        })
-        if ref is None:
+        try:
+            ref = await driver.reconcile_start(
+                runtime_run_id=run_id,
+                session_id=str(record["session_id"]),
+                operation_id=operation_id,
+            )
+        except Exception as exc:
             record["recovery_state"] = "unknown"
-            record["events"].append({
+            record.setdefault("events", []).append({
                 "operation_id": operation_id,
                 "outcome": "unknown",
-                "attempt": len(record["events"]),
-                "detail": "provider did not confirm an execution; no replacement workflow started",
+                "attempt": len(record.get("events", [])),
+                "detail": f"provider state could not be verified: {type(exc).__name__}: {exc}; no start retry issued",
             })
-            _write_record(state_path, record)
+            _write_record(path, record)
+            print(json.dumps({"phase": "unknown", **record}, sort_keys=True))
+            raise
+
+        if ref is None:
+            record["recovery_state"] = "unknown"
+            record.setdefault("events", []).append({
+                "operation_id": operation_id,
+                "outcome": "unknown",
+                "attempt": len(record.get("events", [])),
+                "detail": "provider did not confirm the deterministic workflow; no replacement workflow started",
+            })
+            _write_record(path, record)
             raise RuntimeError("workflow outcome remains unknown; refusing a second start")
 
         record["workflow_ref"] = {
@@ -135,13 +153,13 @@ async def _reconcile(args) -> None:
             "run_id": ref.run_id,
         }
         record["recovery_state"] = "attached"
-        record["events"].append({
+        record.setdefault("events", []).append({
             "operation_id": operation_id,
             "outcome": "attached",
-            "attempt": len(record["events"]),
+            "attempt": len(record.get("events", [])),
             "detail": f"attached existing workflow_id={ref.workflow_id}; provider={ref.provider}; temporal_run_id={ref.run_id}",
         })
-        _write_record(state_path, record)
+        _write_record(path, record)
         print(json.dumps(record, sort_keys=True))
     finally:
         close = getattr(driver.client, "close", None)
