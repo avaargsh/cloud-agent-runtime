@@ -103,6 +103,7 @@ async def scenario() -> None:
             sandbox_a = runtime._sandboxes[canonical_run_id]
             sandbox_a_ref = run.sandbox_ref
             sandbox_a_id = sandbox_a.sandbox_id
+            sandbox_a_namespace = provider._namespace_for(sandbox_a_id)
 
             checkpoint = provider.snapshot(sandbox_a).snapshot_ref
             assert checkpoint is not None
