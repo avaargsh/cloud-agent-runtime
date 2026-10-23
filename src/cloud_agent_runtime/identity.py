@@ -103,6 +103,7 @@ class WorkloadIdentity:
     session_id: str
     run_id: str
     sandbox_id: str
+    sandbox_revision: int
     workspace_ref: str
     binding_id: str
     capability: str

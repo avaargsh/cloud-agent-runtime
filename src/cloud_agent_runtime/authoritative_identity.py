@@ -235,6 +235,10 @@ def _decode_identity(data: Any) -> WorkloadIdentity:
         ):
             raise AuthorityProtocolError("authoritative identity scopes are invalid")
         values["allowed_scopes"] = tuple(raw_scopes)
+        sandbox_revision = data.get("sandbox_revision")
+        if type(sandbox_revision) is not int or sandbox_revision <= 0:
+            raise AuthorityProtocolError("authoritative sandbox revision is invalid")
+        values["sandbox_revision"] = sandbox_revision
         values["issued_at"] = _as_number(data, "issued_at")
         values["expires_at"] = _as_number(data, "expires_at")
         identity = WorkloadIdentity(**values)
@@ -409,6 +413,8 @@ class AuthoritativeCredentialBroker(CredentialBroker):
             _as_string(issued, "run_id") != identity.run_id
             or _as_string(issued, "session_id") != identity.session_id
             or _as_string(issued, "binding_id") != binding.binding_id
+            or _as_string(issued, "sandbox_id") != identity.sandbox_id
+            or _as_number(issued, "sandbox_revision") != identity.sandbox_revision
         ):
             raise AuthorityProtocolError("authoritative credential identity binding mismatch")
         return CredentialLease(
@@ -459,6 +465,8 @@ class AuthoritativeCredentialBroker(CredentialBroker):
         identity = _decode_identity(record.get("workload_identity"))
         if (
             identity.audience != actual_audience
+            or _as_string(record, "sandbox_id") != identity.sandbox_id
+            or _as_number(record, "sandbox_revision") != identity.sandbox_revision
             or identity.expires_at < expires_at
             or identity.expires_at <= self.clock()
             or set(scopes) - set(identity.allowed_scopes)

@@ -158,6 +158,7 @@ class AuthorizedAgentRuntime:
             session_id=session.session_id,
             run_id=run.run_id,
             sandbox_id=persisted.sandbox_id,
+            sandbox_revision=persisted.revision,
             workspace_ref=persisted.sandbox_ref,
             binding_id=binding.binding_id,
             capability=binding.capability,

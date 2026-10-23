@@ -22,7 +22,7 @@ Authority requirements:
 2. Resolve the configured CredentialBinding on the server. Never trust the client's requested Audience or Scope without intersecting it with current capability/tenant policy.
 3. For write/delete/admin/mutate scopes, load current approval from the authoritative approval store inside the issuance decision. Bind it to tenant, Agent, Session, Run, credential binding, audience, exact scope set, approver, expiry, and revocation/version. A client-supplied approval ID or old receipt is not authorization by itself.
 4. Consume request_id atomically and durably. A duplicate ID must not create a second lease; return HTTP 409. The idempotency key is bound to the signed Run and credential binding.
-5. Store only a token digest where possible. Return credential with credential_id, access_token, audience, exact scopes, issued_at, expires_at, run_id, session_id, and binding_id. Expiry cannot exceed requested TTL, configured maximum, assertion expiry or current approval expiry.
+5. Store only a token digest where possible. Return credential with credential_id, access_token, audience, exact scopes, issued_at, expires_at, run_id, session_id, binding_id, sandbox_id, and sandbox_revision. Expiry cannot exceed requested TTL, configured maximum, assertion expiry or current approval expiry.
 
 ### POST /v1/workload-credentials:introspect
 

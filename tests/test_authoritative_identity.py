@@ -68,6 +68,7 @@ def identity(now=10_000.0):
         session_id="session-a",
         run_id="run-a",
         sandbox_id="sandbox-a",
+        sandbox_revision=3,
         workspace_ref="sandbox://kubernetes/sandbox-a",
         binding_id="github-binding",
         capability="github",
@@ -118,6 +119,8 @@ def broker_response(*, scopes=None, audience="https://api.github.com",
             "run_id": run_id,
             "session_id": session_id,
             "binding_id": binding_id,
+            "sandbox_id": "sandbox-a",
+            "sandbox_revision": 3,
         }
     }
 
@@ -184,6 +187,7 @@ def test_issue_sends_signed_assertion_not_caller_claims_and_bounds_lease():
     assert lease.access_token == "opaque-provider-token"
     assert lease.expires_at <= 10_025.0
     assert lease.run_id == "run-a"
+    assert transport.calls[0][2]["workload_assertion"] == "signed-short-lived-workload-assertion"
 
 
 @pytest.mark.parametrize(
