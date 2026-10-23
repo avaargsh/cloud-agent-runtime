@@ -12,7 +12,6 @@ from .identity import (
     CredentialLease,
     CredentialRequest,
     IdentityAuthorizationError,
-    InMemoryCredentialBroker,
     WorkloadIdentity,
 )
 from .models import Run, RunStatus, Session, SessionStatus
@@ -53,7 +52,7 @@ class AuthorizedAgentRuntime:
         runtime: AgentRuntime,
         *,
         credential_bindings: Mapping[str, CredentialBinding],
-        credential_broker: CredentialBroker | None = None,
+        credential_broker: CredentialBroker,
         approval_resolver: ApprovalResolver | None = None,
         issuer: str = "cloud-agent-runtime",
         clock=time.time,
@@ -63,7 +62,9 @@ class AuthorizedAgentRuntime:
         for key, binding in self._credential_bindings.items():
             if key != binding.binding_id:
                 raise ValueError("credential binding map key must equal binding_id")
-        self._credential_broker = credential_broker or InMemoryCredentialBroker(clock=clock)
+        # Require explicit broker injection: never silently boot a tenant-facing
+        # service with the process-local reference broker.
+        self._credential_broker = credential_broker
         self._approval_resolver = approval_resolver
         self._issuer = issuer
         self._clock = clock
