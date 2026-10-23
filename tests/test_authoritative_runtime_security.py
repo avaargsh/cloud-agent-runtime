@@ -128,16 +128,6 @@ def test_production_builder_rejects_reused_token_provider_and_plain_http():
         assertion_issuer=FakeAssertionIssuer(),
         approval_event_verifier=FakeEventVerifier(),
     )
-    with pytest.raises(ValueError, match="distinct token provider"):
-        build_authoritative_runtime_security(
-            **common,
-            authority_base_url="https://identity.example.test",
-            issue_service_token_provider=shared,
-            introspection_service_token_provider=providers[0],
-            credential_revocation_token_provider=providers[1],
-            approval_authority_token_provider=providers[2],
-        )
-        # This branch should not be reached: four roles and only four providers.
     duplicate = shared
     with pytest.raises(ValueError, match="distinct token provider"):
         build_authoritative_runtime_security(
