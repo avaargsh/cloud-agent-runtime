@@ -227,9 +227,19 @@ class KubernetesSandboxProvider:
 
     def terminate(self, sandbox: Sandbox) -> Sandbox:
         namespace = self._namespace_for(sandbox.sandbox_id)
+        probe = self._kubectl(["get", "namespace", namespace, "-o", "name"])
+        if probe.returncode != 0:
+            if "not found" in probe.stderr.lower():
+                # Idempotent cleanup after an earlier namespace deletion.
+                sandbox.status = SandboxStatus.TERMINATED
+                return sandbox
+            raise RuntimeError(
+                f"kubectl get namespace {namespace} failed: {probe.stderr.strip()}"
+            )
+
         # Explicit deletes make provider cleanup observable and retryable;
-        # namespace deletion then removes any unexpected leftover namespaced
-        # resources. API ACK is not proof that async namespace finalization ended.
+        # namespace deletion then removes unexpected leftover resources.
+        # API ACK is not proof that async namespace finalization ended.
         self._check([
             "-n", namespace, "delete", "pod", sandbox.sandbox_id,
             "--ignore-not-found=true", "--wait=false",
