@@ -711,3 +711,57 @@ def test_rebind_replay_recovers_when_cleanup_commit_fails_after_termination():
     original_id = original_ref.rsplit("/", 1)[-1]
     assert provider.terminated_ids.count(original_id) == 2
 
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
+def test_session_identity_cannot_be_rebound(store_kind, tmp_path):
+    from cloud_agent_runtime.models import Session
+
+    store = (
+        InMemoryStore()
+        if store_kind == "memory"
+        else SQLiteStore(tmp_path / "session-identity.db")
+    )
+    original = Session(
+        session_id="stable-session",
+        agent_id="agent-a",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    store.save_session(original)
+
+    with pytest.raises(ValueError, match="session identity is immutable"):
+        store.save_session(
+            Session(
+                session_id="stable-session",
+                agent_id="agent-b",
+                release_id="release-v1",
+                tenant_id="tenant-a",
+            )
+        )
+
+    persisted = store.get_session("stable-session")
+    assert persisted.agent_id == "agent-a"
+    assert persisted.release_id == "release-v1"
+    assert persisted.tenant_id == "tenant-a"
+    if isinstance(store, SQLiteStore):
+        store.close()
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
+def test_run_identity_cannot_be_rebound_to_another_session(store_kind, tmp_path):
+    from cloud_agent_runtime.models import Run
+
+    store = (
+        InMemoryStore()
+        if store_kind == "memory"
+        else SQLiteStore(tmp_path / "run-identity.db")
+    )
+    store.save_run(Run(run_id="stable-run", session_id="session-a"))
+
+    with pytest.raises(ValueError, match="run identity is immutable"):
+        store.save_run(Run(run_id="stable-run", session_id="session-b"))
+
+    assert store.get_run("stable-run").session_id == "session-a"
+    if isinstance(store, SQLiteStore):
+        store.close()
