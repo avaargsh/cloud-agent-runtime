@@ -96,7 +96,10 @@ class TemporalWorkflowDriver:
         *,
         runtime_run_id: str,
         session_id: str,
+        timeout_seconds: float | None = None,
     ) -> WorkflowRef:
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be a finite positive number")
         workflow_id = self.workflow_id_for(
             runtime_run_id
         )
@@ -117,6 +120,14 @@ class TemporalWorkflowDriver:
                     {
                         "runtime_run_id": runtime_run_id,
                         "session_id": session_id,
+                        **(
+                            {
+                                "timeout_seconds": timeout_seconds,
+                                "timeout_event_id": f"timeout:{runtime_run_id}",
+                            }
+                            if timeout_seconds is not None
+                            else {}
+                        ),
                     }
                 ],
                 id=workflow_id,
