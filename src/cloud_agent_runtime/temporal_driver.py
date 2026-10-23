@@ -181,6 +181,43 @@ class TemporalWorkflowDriver:
             ),
         )
 
+    async def reconcile_start(
+        self,
+        *,
+        runtime_run_id: str,
+        session_id: str,
+        operation_id: str,
+        timeout_seconds: float | None = None,
+    ) -> WorkflowRef | None:
+        expected_operation_id = deterministic_start_operation_id(runtime_run_id)
+        if operation_id != expected_operation_id:
+            raise ValueError("start operation identity does not match canonical Run")
+        workflow_id = self.workflow_id_for(runtime_run_id)
+        handle = self.client.get_workflow_handle(workflow_id)
+        describe = getattr(handle, "describe", None)
+        if describe is None:
+            raise TemporalWorkflowConflict(
+                f"cannot reconcile workflow start without status lookup: {workflow_id}"
+            )
+        try:
+            description = await describe()
+        except Exception as exc:
+            raise TemporalWorkflowConflict(
+                f"workflow start outcome remains unknown for {workflow_id}"
+            ) from exc
+        status = getattr(description, "status", None)
+        if isinstance(description, dict):
+            status = description.get("status")
+        if not status:
+            raise TemporalWorkflowConflict(
+                f"workflow start outcome remains unknown; status unavailable: {workflow_id}"
+            )
+        return WorkflowRef(
+            provider=self.name,
+            workflow_id=workflow_id,
+            run_id=getattr(handle, "first_execution_run_id", None),
+        )
+
     async def signal(
         self,
         workflow: WorkflowRef,
