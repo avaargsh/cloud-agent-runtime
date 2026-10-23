@@ -297,13 +297,17 @@ def test_accepted_start_with_lost_ack_reconciles_original_run_without_duplicate(
             tenant_id="tenant-a",
         )
 
+        original_run_id = "run-stable-ack-loss"
         with pytest.raises(RuntimeError, match="lost acknowledgement"):
-            await runtime.start_run(session_id=session.session_id)
+            await runtime.start_run(
+                session_id=session.session_id,
+                run_id=original_run_id,
+            )
 
         persisted_runs = list(store.runs.values())
         assert len(persisted_runs) == 1
         uncertain = persisted_runs[0]
-        original_run_id = uncertain.run_id
+        assert uncertain.run_id == original_run_id
         operation_id = deterministic_start_operation_id(original_run_id)
         assert uncertain.workflow_ref is None
         assert uncertain.recovery_state == "unknown"
@@ -317,7 +321,10 @@ def test_accepted_start_with_lost_ack_reconciles_original_run_without_duplicate(
             sandbox_provider=InMemorySandboxProvider(),
             workflow_driver=driver,
         )
-        recovered = await restarted.reconcile_run(original_run_id)
+        recovered = await restarted.start_run(
+            session_id=session.session_id,
+            run_id=original_run_id,
+        )
 
         assert recovered.run_id == original_run_id
         assert recovered.workflow_ref.workflow_id == f"agent-run-{original_run_id}"
