@@ -260,3 +260,103 @@ def test_async_approval_resolution_retry_redelivers_same_signal() -> None:
         }
 
     asyncio.run(scenario())
+
+
+def test_accepted_start_with_lost_ack_reconciles_original_run_without_duplicate() -> None:
+    async def scenario():
+        from cloud_agent_runtime.async_runtime import RunRecoveryConflict
+        from cloud_agent_runtime.temporal_driver import deterministic_start_operation_id
+
+        store = InMemoryStore()
+        driver = InMemoryAsyncWorkflowDriver()
+        driver.start_outcome_unknown_once = True
+        runtime = AsyncAgentRuntime(
+            store=store,
+            sandbox_provider=InMemorySandboxProvider(),
+            workflow_driver=driver,
+        )
+        session = runtime.create_session(
+            agent_id="sre-agent",
+            release_id="release-v1",
+            tenant_id="tenant-a",
+        )
+
+        with pytest.raises(RuntimeError, match="lost acknowledgement"):
+            await runtime.start_run(session_id=session.session_id)
+
+        persisted_runs = list(store.runs.values())
+        assert len(persisted_runs) == 1
+        uncertain = persisted_runs[0]
+        original_run_id = uncertain.run_id
+        operation_id = deterministic_start_operation_id(original_run_id)
+        assert uncertain.workflow_ref is None
+        assert uncertain.recovery_state == "unknown"
+        assert uncertain.recovery_operation_id == operation_id
+        assert any(event["outcome"] == "unknown" for event in uncertain.recovery_evidence)
+
+        # Reconstruct a new runtime process around the same durable store and
+        # provider. Reconciliation must attach, not issue another start.
+        restarted = AsyncAgentRuntime(
+            store=store,
+            sandbox_provider=InMemorySandboxProvider(),
+            workflow_driver=driver,
+        )
+        recovered = await restarted.reconcile_run(original_run_id)
+
+        assert recovered.run_id == original_run_id
+        assert recovered.workflow_ref.workflow_id == f"agent-run-{original_run_id}"
+        assert recovered.recovery_state == "attached"
+        assert recovered.recovery_operation_id == operation_id
+        assert len(driver.started) == 1
+        assert len(driver.workflows) == 1
+        outcomes = [event["outcome"] for event in recovered.recovery_evidence]
+        assert "unknown" in outcomes
+        assert "attached" in outcomes
+
+    asyncio.run(scenario())
+
+
+def test_unknown_start_without_reconciliation_capability_fails_closed() -> None:
+    async def scenario():
+        from cloud_agent_runtime.async_runtime import RunRecoveryConflict
+
+        class NoReconcileDriver:
+            name = "no-reconcile"
+
+            async def start_run(self, *, runtime_run_id, session_id, timeout_seconds=None):
+                raise RuntimeError("connection reset after request write")
+
+            async def signal(self, workflow, *, name, payload):
+                return None
+
+            async def terminate_run(self, workflow, *, reason, operation_id=None):
+                return None
+
+        store = InMemoryStore()
+        runtime = AsyncAgentRuntime(
+            store=store,
+            sandbox_provider=InMemorySandboxProvider(),
+            workflow_driver=NoReconcileDriver(),
+        )
+        session = runtime.create_session(
+            agent_id="sre-agent",
+            release_id="release-v1",
+            tenant_id="tenant-a",
+        )
+
+        with pytest.raises(RuntimeError, match="connection reset"):
+            await runtime.start_run(session_id=session.session_id)
+        run_id = next(iter(store.runs))
+        persisted = store.get_run(run_id)
+        assert persisted.recovery_state == "unknown"
+
+        restarted = AsyncAgentRuntime(
+            store=store,
+            sandbox_provider=InMemorySandboxProvider(),
+            workflow_driver=NoReconcileDriver(),
+        )
+        with pytest.raises(RunRecoveryConflict, match="no new workflow was created"):
+            await restarted.reconcile_run(run_id)
+        assert store.get_run(run_id).recovery_state == "unknown"
+
+    asyncio.run(scenario())
