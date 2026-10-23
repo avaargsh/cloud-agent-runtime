@@ -203,13 +203,20 @@ def test_temporal_driver_passes_timeout_deadline_into_workflow_input():
 
 def test_temporal_driver_reads_terminal_run_state_from_history_result():
     class ClosedHandle(FakeHandle):
+        def __init__(self):
+            super().__init__()
+            self.query_calls = 0
+            self.result_calls = 0
+
         async def query(self, name, *args):
+            self.query_calls += 1
             raise RuntimeError("closed workflow does not service queries")
 
         async def describe(self):
             return {"status": "COMPLETED"}
 
         async def result(self):
+            self.result_calls += 1
             return {
                 "runtime_run_id": "run-closed",
                 "session_id": "session-closed",
@@ -238,5 +245,16 @@ def test_temporal_driver_reads_terminal_run_state_from_history_result():
         assert state["terminal"] is True
         assert state["paused"] is False
         assert state["runtime_run_id"] == "run-closed"
+        assert client.handle.query_calls == 0
+        assert client.handle.result_calls == 1
 
     asyncio.run(scenario())
+
+
+def test_temporal_status_normalizes_generated_enum_name_prefix():
+    class EnumLikeStatus:
+        name = "WORKFLOW_EXECUTION_STATUS_COMPLETED"
+
+    from cloud_agent_runtime.temporal_driver import _workflow_is_terminal
+
+    assert _workflow_is_terminal(EnumLikeStatus())
