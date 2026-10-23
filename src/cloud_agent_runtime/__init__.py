@@ -1,8 +1,9 @@
 from .artifact_store import LocalArtifactStore
-from .async_runtime import AsyncAgentRuntime
+from .async_runtime import AsyncAgentRuntime, RunRecoveryConflict
 from .async_workflow import (
     AsyncWorkflowDriver,
     InMemoryAsyncWorkflowDriver,
+    WorkflowStartOutcomeUnknown,
 )
 from .contracts import (
     Approval,
@@ -42,7 +43,11 @@ from .sandbox import (
 )
 from .store import InMemoryStore, SQLiteStore
 from .temporal_bridge import TemporalRunBridge, TemporalRunStatus
-from .temporal_driver import TemporalWorkflowDriver
+from .temporal_driver import (
+    TemporalWorkflowDriver,
+    deterministic_cleanup_operation_id,
+    deterministic_start_operation_id,
+)
 from .tool_contract import (
     RetryableToolError,
     ToolContract,
@@ -86,6 +91,7 @@ __all__ = [
     "Provenance",
     "RetryableToolError",
     "Run",
+    "RunRecoveryConflict",
     "RunStatus",
     "SandboxBinding",
     "S3ObjectStore",
@@ -103,5 +109,8 @@ __all__ = [
     "UnverifiedToolOutcome",
     "VerifiedToolOutcome",
     "WorkflowRef",
+    "WorkflowStartOutcomeUnknown",
+    "deterministic_cleanup_operation_id",
+    "deterministic_start_operation_id",
     "execute_tool",
 ]
