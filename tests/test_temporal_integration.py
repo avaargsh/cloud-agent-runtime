@@ -4,6 +4,12 @@ from uuid import uuid4
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
+from cloud_agent_runtime import (
+    AsyncAgentRuntime,
+    Budget,
+    SQLiteStore,
+    TemporalWorkflowDriver,
+)
 from cloud_agent_runtime.temporal_workflow import (
     AgentRunWorkflow,
 )
@@ -233,5 +239,82 @@ def test_temporal_run_timeout_is_durable_and_terminal() -> None:
                 assert timeout_event["event_id"] == "deadline-timeout-1"
                 assert timeout_event["runtime_run_id"] == payload["runtime_run_id"]
                 assert timeout_event["session_id"] == payload["session_id"]
+
+    asyncio.run(scenario())
+
+
+
+def test_run_budget_timeout_is_reconciled_after_temporal_execution_closes(tmp_path) -> None:
+    async def scenario() -> None:
+        async with await WorkflowEnvironment.start_time_skipping() as env:
+            task_queue = f"test-agent-budget-timeout-{uuid4()}"
+            database = tmp_path / "budget-timeout.db"
+            store = SQLiteStore(database)
+            runtime = AsyncAgentRuntime(
+                store=store,
+                workflow_driver=TemporalWorkflowDriver(
+                    client=env.client,
+                    task_queue=task_queue,
+                ),
+            )
+            session = runtime.create_session(
+                agent_id="sre-agent",
+                release_id="release-v1",
+                tenant_id="tenant-timeout",
+            )
+
+            async with Worker(
+                env.client,
+                task_queue=task_queue,
+                workflows=[AgentRunWorkflow],
+            ):
+                run = await runtime.start_run(
+                    session_id=session.session_id,
+                    budget=Budget(max_wall_seconds=2),
+                )
+                assert run.status.value == "running"
+                assert run.workflow_ref is not None
+
+                handle = env.client.get_workflow_handle(
+                    run.workflow_ref.workflow_id,
+                    run_id=run.workflow_ref.run_id,
+                )
+                result = await handle.result()
+                assert result["phase"] == "failed"
+                assert result["runtime_run_id"] == run.run_id
+                assert result["session_id"] == session.session_id
+                assert result["transition_events"][-1]["event_type"] == "run_timed_out"
+                assert result["transition_events"][-1]["event_id"] == (
+                    f"timeout:{run.run_id}"
+                )
+
+                reconciled = await runtime.reconcile_run(run.run_id)
+                assert reconciled.status.value == "failed"
+                assert reconciled.run_id == run.run_id
+                assert reconciled.session_id == session.session_id
+                assert reconciled.workflow_ref == run.workflow_ref
+                assert [
+                    (event["from_status"], event["to_status"])
+                    for event in reconciled.transition_events
+                ] == [
+                    ("created", "running"),
+                    ("running", "failed"),
+                ]
+                assert reconciled.transition_events[-1]["event_type"] == (
+                    "workflow_run_timed_out"
+                )
+                assert reconciled.transition_events[-1]["event_id"] == (
+                    f"timeout:{run.run_id}"
+                )
+                assert reconciled.metadata["terminal_reason"] == (
+                    "run timed out after 2 seconds"
+                )
+
+                recovered = store.get_run(run.run_id)
+                assert recovered.status.value == "failed"
+                assert recovered.transition_events == reconciled.transition_events
+                assert recovered.workflow_ref == run.workflow_ref
+
+            store.close()
 
     asyncio.run(scenario())
