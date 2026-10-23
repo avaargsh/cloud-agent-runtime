@@ -7,6 +7,22 @@ from .workflow import WorkflowRef
 
 
 def deterministic_start_operation_id(runtime_run_id: str) -> str:
+    """Stable provider-start operation identity, independent of attempts."""
+    if not runtime_run_id or not runtime_run_id.strip():
+        raise ValueError("runtime_run_id must be non-empty")
+    return f"agent-run-start:{runtime_run_id}"
+
+
+def deterministic_cleanup_operation_id(run_id: str, sandbox_ref: str) -> str:
+    """Stable cleanup identity bound to its owner Run and sandbox reference."""
+    if not run_id or not run_id.strip():
+        raise ValueError("run_id must be non-empty")
+    if not sandbox_ref or not sandbox_ref.strip():
+        raise ValueError("sandbox_ref must be non-empty")
+    return f"sandbox-cleanup:{run_id}:{sandbox_ref}"
+
+
+def deterministic_start_operation_id(runtime_run_id: str) -> str:
     """Stable start-operation identity scoped to the canonical Run."""
     if not runtime_run_id or not runtime_run_id.strip():
         raise ValueError("runtime_run_id must be non-empty")
