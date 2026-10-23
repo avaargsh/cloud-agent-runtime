@@ -451,12 +451,9 @@ def test_temporal_worker_process_sigkill_restarts_same_workflow_identity() -> No
                 "runtime_run_id": runtime_run_id,
                 "session_id": session_id,
             }
-            client_config = env.client.config
-            target = (
-                client_config["target_host"]
-                if isinstance(client_config, dict)
-                else client_config.target_host
-            )
+            # The Temporal SDK's Client.config is a method; its service
+            # client exposes the concrete target needed by the subprocess.
+            target = env.client.service_client.config.target_host
             repository_root = Path(__file__).resolve().parents[1]
             workers: list[subprocess.Popen] = []
             handle = None
