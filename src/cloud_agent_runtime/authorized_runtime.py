@@ -204,7 +204,9 @@ class AuthorizedAgentRuntime:
         return self._runtime.pause_run(run_id)
 
     def resume_run(self, principal: AuthenticatedPrincipal, *, run_id: str) -> Run:
-        self._owned_run(principal, run_id)
+        _, session = self._owned_run(principal, run_id)
+        if session.status != SessionStatus.ACTIVE:
+            raise IdentityAuthorizationError("cannot resume a Run in an inactive session")
         self._credential_broker.revoke_run(run_id)
         return self._runtime.resume_run(run_id)
 
@@ -215,7 +217,11 @@ class AuthorizedAgentRuntime:
         run_id: str,
         rebind_key: str | None = None,
     ) -> Run:
-        run, _ = self._owned_run(principal, run_id)
+        run, session = self._owned_run(principal, run_id)
+        if session.status != SessionStatus.ACTIVE:
+            raise IdentityAuthorizationError("cannot rebind a Run in an inactive session")
+        if run.status != RunStatus.RUNNING:
+            raise IdentityAuthorizationError("sandbox rebind requires a running Run")
         self._credential_broker.revoke_run(run_id)
         # Snapshot refs are taken only from canonical persisted state. Accepting
         # a caller-selected ref could attach another Run's checkpoint/workspace.
