@@ -86,6 +86,14 @@ class KubernetesSandboxProvider:
             ) from exc
         return KubectlResult(result.returncode, result.stdout, result.stderr)
 
+    def _check(self, args: list[str], *, stdin: str | None = None) -> KubectlResult:
+        result = self._invoke_kubectl(args, stdin=stdin)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"kubectl {' '.join(args)} failed: {result.stderr.strip()}"
+            )
+        return result
+
     def ensure_namespace(self, namespace: str | None = None) -> None:
         target = namespace or self.namespace
         probe = self._invoke_kubectl(["get", "namespace", target, "-o", "name"])
