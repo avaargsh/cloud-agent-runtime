@@ -1,8 +1,9 @@
 import asyncio
 from uuid import uuid4
 
-from temporalio.exceptions import CancelledError
 from temporalio import workflow
+from temporalio.client import WorkflowFailureError
+from temporalio.exceptions import CancelledError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
@@ -84,8 +85,8 @@ def test_temporal_workflow_cancel_is_terminal_and_not_success() -> None:
                 await handle.cancel()
                 try:
                     await handle.result()
-                except CancelledError:
-                    pass
+                except WorkflowFailureError as exc:
+                    assert isinstance(exc.cause, CancelledError)
                 else:
                     raise AssertionError("cancelled workflow unexpectedly returned a success result")
 
