@@ -38,8 +38,12 @@ class FakeKubectl:
         if "label" in args:
             return KubectlResult(0, "", "")
         if "delete" in args:
-            pod = args[args.index("pod") + 1]
-            self.pods.discard(pod)
+            if "pod" in args:
+                pod = args[args.index("pod") + 1]
+                self.pods.discard(pod)
+            elif "namespace" in args:
+                self.namespace_exists = False
+                self.pods.clear()
             return KubectlResult(0, "", "")
         return KubectlResult(1, "", "unexpected kubectl call")
 
