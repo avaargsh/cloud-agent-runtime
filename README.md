@@ -65,3 +65,8 @@ PostgreSQL runtime-state persistence, production credential authority integratio
 ## Contributing and license
 
 See `CONTRIBUTING.md`, `SECURITY.md`, and `CODE_OF_CONDUCT.md`. Licensed under Apache License 2.0; see [LICENSE](LICENSE).
+
+
+## P0 Run recovery acceptance boundary
+
+The canonical Run ID and deterministic Workflow ID must remain stable across ambiguous start acknowledgements and Runtime/Worker restarts. Cleanup intent remains pending until provider state independently confirms the sandbox is gone. See [docs/recovery-matrix.md](docs/recovery-matrix.md) for scenarios and explicit production evidence boundaries.
