@@ -118,7 +118,7 @@ class TerminateFailAsyncDriver(InMemoryAsyncWorkflowDriver):
         raise RuntimeError("simulated async termination failure")
 
 
-def test_async_binding_persistence_failure_terminates_workflow():
+def test_recovery_intent_persistence_failure_never_calls_provider():
     async def scenario():
         store = FailOnRunSaveNumberStore(fail_on=2)
         driver = InMemoryAsyncWorkflowDriver()
@@ -137,25 +137,25 @@ def test_async_binding_persistence_failure_terminates_workflow():
             RuntimeError,
             match="simulated run persistence failure",
         ):
-            await runtime.start_run(
-                session_id=session.session_id,
-            )
+            await runtime.start_run(session_id=session.session_id)
 
-        runs = list(store.runs.values())
-        assert len(runs) == 1
-        assert runs[0].status == RunStatus.FAILED
-        assert runs[0].workflow_ref is None
-        assert len(driver.terminated) == 1
-        assert driver.terminated[0][1] == "runtime binding persistence failed"
+        # Canonical Run was saved, but the recovery intent was not. No remote
+        # provider request is permitted until that intent can be committed.
+        assert len(store.runs) == 1
+        persisted = next(iter(store.runs.values()))
+        assert persisted.workflow_ref is None
+        assert persisted.recovery_state == "none"
+        assert driver.started == []
+        assert driver.workflows == {}
         assert runtime._sandboxes == {}
 
     asyncio.run(scenario())
 
 
-def test_async_termination_failure_retains_workflow_ref():
+def test_provider_ack_followed_by_recovery_save_failure_reconciles_same_workflow():
     async def scenario():
-        store = FailOnRunSaveNumberStore(fail_on=2)
-        driver = TerminateFailAsyncDriver()
+        store = FailOnRunSaveNumberStore(fail_on=3)
+        driver = InMemoryAsyncWorkflowDriver()
         runtime = AsyncAgentRuntime(
             store=store,
             sandbox_provider=InMemorySandboxProvider(),
@@ -171,18 +171,31 @@ def test_async_termination_failure_retains_workflow_ref():
             RuntimeError,
             match="simulated run persistence failure",
         ):
-            await runtime.start_run(
-                session_id=session.session_id,
-            )
+            await runtime.start_run(session_id=session.session_id)
 
-        runs = list(store.runs.values())
-        assert len(runs) == 1
-        assert runs[0].status == RunStatus.FAILED
-        assert runs[0].workflow_ref is not None
-        assert runtime._sandboxes == {}
+        assert len(driver.started) == 1
+        assert len(driver.workflows) == 1
+        persisted = next(iter(store.runs.values()))
+        original_run_id = persisted.run_id
+        operation_id = f"agent-run-start:{original_run_id}"
+        assert persisted.workflow_ref is None
+        assert persisted.recovery_state == "start_pending"
+        assert persisted.recovery_operation_id == operation_id
+
+        restarted = AsyncAgentRuntime(
+            store=store,
+            sandbox_provider=InMemorySandboxProvider(),
+            workflow_driver=driver,
+        )
+        recovered = await restarted.reconcile_run(original_run_id)
+
+        assert recovered.run_id == original_run_id
+        assert recovered.workflow_ref.workflow_id == f"agent-run-{original_run_id}"
+        assert recovered.recovery_state == "attached"
+        assert recovered.recovery_operation_id == operation_id
+        assert len(driver.started) == 1
 
     asyncio.run(scenario())
-
 
 
 class FailOnceAsyncApprovalSignalDriver(InMemoryAsyncWorkflowDriver):
