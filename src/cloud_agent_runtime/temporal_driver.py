@@ -212,6 +212,15 @@ class TemporalWorkflowDriver:
             raise TemporalWorkflowConflict(
                 f"workflow start outcome remains unknown; status unavailable: {workflow_id}"
             )
+        if _workflow_is_terminal(status):
+            # A terminal execution proves an execution exists, but not that
+            # it is safe to reuse as a running Run. Preserve the canonical
+            # reference so the caller can reconcile terminal state separately.
+            return WorkflowRef(
+                provider=self.name,
+                workflow_id=workflow_id,
+                run_id=getattr(handle, "first_execution_run_id", None),
+            )
         return WorkflowRef(
             provider=self.name,
             workflow_id=workflow_id,
