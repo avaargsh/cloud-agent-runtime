@@ -853,5 +853,71 @@ def test_cancel_is_durable_and_retry_resends_same_workflow_signal(tmp_path):
     )
     assert replay.transition_events == cancelled.transition_events
     assert [signal[1] for signal in workflow.signals].count("cancel_run") == 2
-    store.close()
+    store.close()\n
 
+class FailOnceCancelWorkflowDriver(RecordingWorkflowDriver):
+    def __init__(self):
+        super().__init__()
+        self.fail_cancel_once = True
+
+    def signal(self, workflow, *, name: str, payload: dict):
+        super().signal(workflow, name=name, payload=payload)
+        if name == "cancel_run" and self.fail_cancel_once:
+            self.fail_cancel_once = False
+            raise RuntimeError("simulated workflow signal delivery failure")
+
+
+def test_cancel_signal_failure_recovers_from_durable_intent(tmp_path):
+    db = tmp_path / "cancel-signal-failure.db"
+    store = SQLiteStore(db)
+    workflow = FailOnceCancelWorkflowDriver()
+    runtime = AgentRuntime(store=store, workflow_driver=workflow)
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+
+    with pytest.raises(
+        RuntimeError,
+        match="simulated workflow signal delivery failure",
+    ):
+        runtime.cancel_run(
+            run.run_id,
+            reason="operator requested cancellation",
+            event_id="cancel-event-stable",
+            evidence_refs=["evidence://ops/cancel-stable"],
+        )
+
+    # The durable intent must survive a failed external delivery.
+    persisted = store.get_run(run.run_id)
+    assert persisted.status.value == "cancelled"
+    assert persisted.metadata["terminal_reason"] == "operator requested cancellation"
+    assert persisted.metadata["cancel_event_id"] == "cancel-event-stable"
+    assert persisted.transition_events[-1]["event_id"] == "cancel-event-stable"
+
+    replay = runtime.cancel_run(
+        run.run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-event-stable",
+        evidence_refs=["evidence://ops/cancel-stable"],
+    )
+    assert replay.status.value == "cancelled"
+    assert len(replay.transition_events) == len(persisted.transition_events)
+    assert len(workflow.signals) == 2
+    assert workflow.signals[0][2] == workflow.signals[1][2]
+
+    # A conflicting retry is rejected instead of changing the first request.
+    with pytest.raises(
+        ValueError,
+        match="cancellation retry metadata differs from durable request",
+    ):
+        runtime.cancel_run(
+            run.run_id,
+            reason="different cancellation intent",
+            event_id="cancel-event-conflict",
+            evidence_refs=["evidence://ops/other"],
+        )
+    assert len(workflow.signals) == 2
+    store.close()
