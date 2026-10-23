@@ -1,0 +1,69 @@
+name: kind-network-isolation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/cloud_agent_runtime/kubernetes_sandbox.py"
+      - "src/cloud_agent_runtime/runtime.py"
+      - "scripts/kind-network-isolation-smoke.py"
+      - ".github/kind-calico-config.yaml"
+      - ".github/workflows/kind-network-isolation.yml"
+
+jobs:
+  network-isolation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: helm/kind-action@v1.14.0
+        with:
+          cluster_name: sandbox-calico-proof
+          node_image: kindest/node:v1.35.0
+          kubectl_version: v1.35.0
+          config: .github/kind-calico-config.yaml
+          wait: 0
+      - name: Install pinned Calico NetworkPolicy CNI
+        run: |
+          kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.33.0/manifests/v3_projectcalico_org-v1beta1.yaml
+          kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.33.0/manifests/tigera-operator.yaml
+          kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.33.0/manifests/custom-resources.yaml
+          kubectl -n tigera-operator rollout status deployment/tigera-operator --timeout=180s
+          kubectl -n calico-system rollout status daemonset/calico-node --timeout=240s
+          kubectl -n calico-system rollout status deployment/calico-kube-controllers --timeout=240s
+          kubectl wait --for=condition=Ready nodes --all --timeout=240s
+          kubectl get nodes -o wide
+          kubectl get pods -n calico-system -o wide
+      - name: Install runtime
+        run: pip install -e .
+      - name: Verify enforced cross-tenant deny, ephemeral workspace and cleanup retry
+        run: |
+          set -o pipefail
+          python scripts/kind-network-isolation-smoke.py | tee /tmp/network-isolation-proof.txt
+          grep -qx 'PASS' /tmp/network-isolation-proof.txt
+          grep -qx 'cross_tenant_ingress=denied' /tmp/network-isolation-proof.txt
+          grep -qx 'sandbox_egress=denied' /tmp/network-isolation-proof.txt
+          grep -qx 'workspace_isolation=passed' /tmp/network-isolation-proof.txt
+          grep -qx 'cleanup_retry=passed' /tmp/network-isolation-proof.txt
+          grep -qx 'namespace_destruction=passed' /tmp/network-isolation-proof.txt
+      - name: Capture CNI and namespace evidence
+        if: always()
+        run: |
+          kubectl get nodes -o wide > /tmp/network-isolation-nodes.txt 2>&1 || true
+          kubectl get pods -A -o wide > /tmp/network-isolation-pods.txt 2>&1 || true
+          kubectl get networkpolicies -A -o yaml > /tmp/network-isolation-policies.yaml 2>&1 || true
+          kubectl get namespaces -o wide > /tmp/network-isolation-namespaces.txt 2>&1 || true
+      - name: Upload live network-policy evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: calico-network-isolation-proof
+          path: |
+            /tmp/network-isolation-proof.txt
+            /tmp/network-isolation-nodes.txt
+            /tmp/network-isolation-pods.txt
+            /tmp/network-isolation-policies.yaml
+            /tmp/network-isolation-namespaces.txt
