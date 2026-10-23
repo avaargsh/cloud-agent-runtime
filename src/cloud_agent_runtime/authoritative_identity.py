@@ -456,7 +456,15 @@ class AuthoritativeCredentialBroker(CredentialBroker):
             or expires_at <= self.clock()
         ):
             raise IdentityAuthorizationError("credential audience, scope, expiry, or revocation check failed")
-        return _decode_identity(record.get("workload_identity"))
+        identity = _decode_identity(record.get("workload_identity"))
+        if (
+            identity.audience != actual_audience
+            or identity.expires_at < expires_at
+            or identity.expires_at <= self.clock()
+            or set(scopes) - set(identity.allowed_scopes)
+        ):
+            raise IdentityAuthorizationError("credential identity binding is inconsistent with the active lease")
+        return identity
 
     def revoke_credential(self, credential_id: str) -> bool:
         response = self.transport.request(
