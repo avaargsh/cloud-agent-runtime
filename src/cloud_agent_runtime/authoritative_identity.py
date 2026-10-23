@@ -7,18 +7,15 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
-from urllib.request import (
-    HTTPRedirectHandler,
-    HTTPSHandler,
-    Request,
-    build_opener,
-)
-
-# Temporal's workflow sandbox inspects every imported module in the workflow
-# call graph. This transport is an external I/O adapter and is never invoked
-# from deterministic workflow code; pass through the stdlib HTTP layer.
 from temporalio.workflow import unsafe
 
+with unsafe.imports_passed_through():
+    from urllib.request import (
+        HTTPRedirectHandler,
+        HTTPSHandler,
+        Request,
+        build_opener,
+    )
 
 from .identity import (
     ApprovalGrant,
@@ -32,8 +29,6 @@ from .identity import (
     IdentityAuthorizationError,
     WorkloadIdentity,
 )
-
-
 class AuthorityUnavailableError(RuntimeError):
     """The authoritative identity service cannot be reached safely."""
 
