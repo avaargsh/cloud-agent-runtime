@@ -28,6 +28,7 @@ s3 = [
 
 [project.scripts]
 cloud-agent-runtime-worker = "cloud_agent_runtime.temporal_worker:main"
+cloud-agent-runtime-recovery-probe = "cloud_agent_runtime.recovery_probe:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
