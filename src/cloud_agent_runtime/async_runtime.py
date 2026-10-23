@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from .async_workflow import AsyncWorkflowDriver, WorkflowStartOutcomeUnknown
 from .contracts import Approval, ApprovalStatus, Budget
-from .models import Run, RunStatus
+from .models import Run, RunStatus, SessionStatus
 from .runtime import AgentRuntime
 from .sandbox import SandboxProvider
 from .store import RuntimeStore
@@ -76,7 +76,14 @@ class AsyncAgentRuntime(AgentRuntime):
         session_id: str,
         sandbox_ref: str | None = None,
         budget: Budget | None = None,
+        run_id: str | None = None,
     ) -> Run:
+        """Create or replay a Run using caller-stable identity when supplied.
+
+        If a prior attempt may have reached the Workflow provider, this method
+        reconciles the original deterministic provider identity; it never
+        creates a second Run or starts a replacement Workflow for the same ID.
+        """
         if budget is not None:
             timeout = budget.max_wall_seconds
             if timeout is not None and (
@@ -86,13 +93,62 @@ class AsyncAgentRuntime(AgentRuntime):
             ):
                 raise ValueError("budget.max_wall_seconds must be a positive integer")
 
-        # Canonical Run identity and sandbox binding must be persisted before
-        # any remote workflow start is requested.
-        run = super().start_run(
-            session_id=session_id,
-            sandbox_ref=sandbox_ref,
-            budget=budget,
-        )
+        existing: Run | None = None
+        if run_id is not None:
+            if not run_id.strip():
+                raise ValueError("run_id must not be empty")
+            try:
+                existing = self.store.get_run(run_id)
+            except KeyError:
+                existing = None
+
+        if existing is not None:
+            if existing.session_id != session_id:
+                raise ValueError("run_id is already bound to a different Session")
+            if sandbox_ref is not None and existing.sandbox_ref != sandbox_ref:
+                raise ValueError("run_id replay changed the sandbox reference")
+            if budget is not None and existing.budget != budget:
+                raise ValueError("run_id replay changed the Run budget")
+            if existing.status in {RunStatus.SUCCEEDED, RunStatus.FAILED}:
+                return existing
+            if existing.recovery_state in {
+                "start_pending",
+                "unknown",
+                "intent_persisted",
+            }:
+                # Attach/observe only. In an ambiguous state, a retry must not
+                # issue another start merely because the first ACK was lost.
+                return await self.reconcile_run(existing.run_id)
+            if (
+                existing.recovery_state == "attached"
+                and existing.workflow_ref is not None
+            ):
+                return existing
+            if (
+                existing.recovery_state == "none"
+                and existing.workflow_ref is None
+            ):
+                # The provider call is forbidden until recovery intent commits.
+                # Therefore a durable record with no intent proves the first
+                # attempt did not send the Workflow start request.
+                session = self.store.get_session(session_id)
+                if session.status != SessionStatus.ACTIVE:
+                    raise ValueError("runs can only start on an active session")
+                run = existing
+            else:
+                raise RunRecoveryConflict(
+                    f"Run {existing.run_id} has inconsistent recovery metadata; refusing duplicate start"
+                )
+        else:
+            # Canonical Run identity and sandbox binding are persisted before
+            # any remote workflow start is requested.
+            run = super().start_run(
+                session_id=session_id,
+                sandbox_ref=sandbox_ref,
+                budget=budget,
+                run_id=run_id,
+            )
+
         operation_id = deterministic_start_operation_id(run.run_id)
         run.recovery_operation_id = operation_id
         run.recovery_state = "start_pending"
