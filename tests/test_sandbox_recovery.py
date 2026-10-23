@@ -1064,3 +1064,45 @@ def test_cancel_cleanup_commit_failure_retries_without_reallocating_sandbox():
     assert recovered.sandbox_binding.pending_cleanup_refs == []
     assert len(provider.allocated_ids) == allocations_after_failure == 1
     assert provider.terminated_ids == [original_sandbox_id, original_sandbox_id]
+
+
+def test_cancel_signal_failure_still_cleans_sandbox_once():
+    provider = CountingSandboxProvider()
+    workflow = FailOnceCancelWorkflowDriver()
+    runtime = AgentRuntime(
+        sandbox_provider=provider,
+        workflow_driver=workflow,
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+    sandbox_id = run.sandbox_binding.sandbox_id
+
+    with pytest.raises(
+        RuntimeError,
+        match="simulated workflow signal delivery failure",
+    ):
+        runtime.cancel_run(
+            run.run_id,
+            reason="operator requested cancellation",
+            event_id="cancel-signal-cleanup",
+        )
+
+    persisted = runtime.store.get_run(run.run_id)
+    assert persisted.status.value == "cancelled"
+    assert persisted.sandbox_binding.pending_cleanup_refs == []
+    assert persisted.metadata["cancel_cleanup_completed_ref"] == run.sandbox_ref
+    assert provider.terminated_ids == [sandbox_id]
+
+    # Retry redelivers the same workflow signal but doesn't re-terminate a
+    # sandbox whose successful cleanup was already durably recorded.
+    replay = runtime.cancel_run(
+        run.run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-signal-cleanup",
+    )
+    assert replay.status.value == "cancelled"
+    assert provider.terminated_ids == [sandbox_id]
