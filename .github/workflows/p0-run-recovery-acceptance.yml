@@ -1,0 +1,63 @@
+name: p0-run-recovery-acceptance
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/cloud_agent_runtime/async_runtime.py"
+      - "src/cloud_agent_runtime/async_workflow.py"
+      - "src/cloud_agent_runtime/temporal_driver.py"
+      - "src/cloud_agent_runtime/models.py"
+      - "src/cloud_agent_runtime/serialization.py"
+      - "src/cloud_agent_runtime/runtime.py"
+      - "src/cloud_agent_runtime/recovery_probe.py"
+      - "tests/test_async_runtime.py"
+      - "tests/test_runtime.py"
+      - "tests/test_temporal_driver.py"
+      - "docs/recovery-acceptance.md"
+      - ".github/workflows/p0-run-recovery-acceptance.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  unit-and-store-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install -U pip
+      - run: pip install -e ".[dev]"
+      - name: Run P0 recovery-focused tests
+        run: |
+          pytest -q tests/test_async_runtime.py tests/test_runtime.py tests/test_temporal_driver.py
+      - name: Record exact-head evidence and NOT RUN production scenarios
+        if: always()
+        env:
+          TESTED_SHA: ${{ github.sha }}
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: |
+          mkdir -p recovery-report
+          cat > recovery-report/recovery-evidence.txt <<EOF
+          exact_commit_sha=$TESTED_SHA
+          python_version=$PYTHON_VERSION
+          focused_test_command=pytest -q tests/test_async_runtime.py tests/test_runtime.py tests/test_temporal_driver.py
+          os_process_sigkill_live_temporal_ack_loss=NOT RUN
+          live_provider_cleanup_ack_loss=NOT RUN
+          sandbox_cleanup_injected_ack_loss=covered-by-focused-tests-if-job-passes
+          note=Mock/provider-test-environment success is not live process/provider evidence.
+          EOF
+          cat recovery-report/recovery-evidence.txt
+      - name: Upload exact-head recovery report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p0-recovery-report-py${{ matrix.python-version }}-${{ github.sha }}
+          path: recovery-report/recovery-evidence.txt
