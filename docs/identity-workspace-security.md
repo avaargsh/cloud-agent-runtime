@@ -14,7 +14,7 @@ Credential binding configuration is server-owned. A request selects a configured
 - Read-only scopes may be issued only when the Session has the matching read capability.
 - Scopes ending in **:write**, **:delete**, **:admin**, or **:mutate** require an approval receipt from the configured trusted ApprovalResolver. The receipt is bound to tenant, Agent, Session, Run, CredentialBinding, audience, scope set, approver, and expiry.
 - A credential issuance request ID is one-shot per Run and binding. Replaying it is rejected rather than minting another token.
-- Credentials can be revoked individually by the broker, by Run, or by approval. The facade revokes a Run's credentials before pause/resume/rebind, after successful completion, and before cancellation. Resumed/replaced workspaces must obtain new leases.
+- Credentials can be revoked individually by the broker, by Run, or by approval. The facade revokes a Run's credentials before pause/resume/rebind/completion/cancellation. Approval revocation is fanned out by a trusted administrative event to the approval authority and broker; it is deliberately not a tenant-facing facade method. Resumed/replaced workspaces must obtain new leases.
 - The in-memory broker is a deterministic reference/test adapter. Its replay ledger is process-local and its opaque tokens are not upstream provider credentials. Production requires a durable broker adapter (for example, Vault/OIDC/STS), durable request-ID consumption, an authenticated token-exchange/validation boundary, and a trusted approval service. Never persist access-token strings in Run metadata or logs.
 
 ## Sandbox and workspace policy
