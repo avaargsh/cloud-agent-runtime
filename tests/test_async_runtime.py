@@ -91,11 +91,11 @@ def test_async_workflow_start_failure_marks_run_failed() -> None:
                 session_id=session.session_id,
             )
 
-        runs = [runtime.store.get_run(run_id) for run_id in runtime.store.runs] if hasattr(runtime.store, "runs") else []
-        assert len(runs) == 1
-        assert runs[0].status == RunStatus.RUNNING
-        assert runs[0].recovery_state == "unknown"
-        assert runtime._sandboxes != {}
+        assert len(runtime.store.runs) == 1
+        persisted_run = next(iter(runtime.store.runs.values()))
+        assert persisted_run.status == RunStatus.RUNNING
+        assert persisted_run.recovery_state == "unknown"
+        assert len(runtime._sandboxes) == 1
 
     asyncio.run(scenario())
 
