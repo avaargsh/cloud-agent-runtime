@@ -476,10 +476,15 @@ class AuthoritativeCredentialBroker(CredentialBroker):
         return identity
 
     def revoke_credential(self, credential_id: str) -> bool:
+        if not isinstance(credential_id, str) or not credential_id.strip():
+            raise ValueError("credential_id is required")
+        event_id = "runtime:credential:" + hashlib.sha256(
+            credential_id.encode("utf-8")
+        ).hexdigest()
         response = self.transport.request(
             "POST",
             "/v1/workload-credentials:revoke",
-            {"credential_id": credential_id},
+            {"credential_id": credential_id, "event_id": event_id},
         )
         revoked = response.get("revoked")
         if type(revoked) is not bool:
@@ -489,10 +494,21 @@ class AuthoritativeCredentialBroker(CredentialBroker):
     def revoke_run(self, run_id: str, *, sandbox_revision: int) -> int:
         if type(sandbox_revision) is not int or sandbox_revision <= 0:
             raise ValueError("sandbox_revision must be a positive integer")
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ValueError("run_id is required")
+        event_id = (
+            "runtime:run:"
+            + hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+            + f":sandbox:{sandbox_revision}"
+        )
         response = self.transport.request(
             "POST",
             "/v1/workload-credentials:revoke-run",
-            {"run_id": run_id, "sandbox_revision": sandbox_revision},
+            {
+                "run_id": run_id,
+                "sandbox_revision": sandbox_revision,
+                "event_id": event_id,
+            },
         )
         return _revoked_count(response)
 
@@ -502,11 +518,16 @@ class AuthoritativeCredentialBroker(CredentialBroker):
         *,
         event_id: str | None = None,
     ) -> int:
+        if not isinstance(approval_id, str) or not approval_id.strip():
+            raise ValueError("approval_id is required")
         body: dict[str, Any] = {"approval_id": approval_id}
-        if event_id is not None:
-            if not event_id.strip():
-                raise ValueError("event_id must be non-empty when supplied")
-            body["event_id"] = event_id
+        if event_id is not None and not event_id.strip():
+            raise ValueError("event_id must be non-empty when supplied")
+        body["event_id"] = event_id or (
+            "runtime:approval:"
+            + hashlib.sha256(approval_id.encode("utf-8")).hexdigest()
+            + ":revocation"
+        )
         response = self.transport.request(
             "POST",
             "/v1/workload-credentials:revoke-approval",
