@@ -1,3 +1,5 @@
+import json
+
 from cloud_agent_runtime import AgentRuntime, InMemoryWorkflowDriver
 from cloud_agent_runtime.kubernetes_sandbox import KubernetesSandboxProvider, KubectlResult
 
@@ -7,6 +9,8 @@ class FakeKubectl:
         self.calls = []
         self.namespace_exists = False
         self.pods = set()
+        self.network_policies = set()
+        self.manifests = []
 
     def __call__(self, args, *, stdin=None):
         self.calls.append((tuple(args), stdin))
@@ -16,16 +20,26 @@ class FakeKubectl:
             self.namespace_exists = True
             return KubectlResult(0, "", "")
         if args[:2] == ["apply", "-f"]:
-            assert stdin and '"kind": "Pod"' in stdin
-            import json
-            pod = json.loads(stdin)["metadata"]["name"]
-            self.pods.add(pod)
+            assert stdin
+            manifest = json.loads(stdin)
+            self.manifests.append(manifest)
+            name = manifest["metadata"]["name"]
+            if manifest["kind"] == "Pod":
+                self.pods.add(name)
+            elif manifest["kind"] == "NetworkPolicy":
+                self.network_policies.add(name)
+            else:
+                return KubectlResult(1, "", "unexpected manifest kind")
             return KubectlResult(0, "", "")
         if "label" in args:
             return KubectlResult(0, "", "")
         if "delete" in args:
-            pod = args[args.index("pod") + 1]
-            self.pods.discard(pod)
+            kind = args[args.index("delete") + 1]
+            name = args[args.index(kind) + 1]
+            if kind == "pod":
+                self.pods.discard(name)
+            elif kind == "networkpolicy":
+                self.network_policies.discard(name)
             return KubectlResult(0, "", "")
         return KubectlResult(1, "", "unexpected kubectl call")
 
@@ -61,6 +75,7 @@ def test_kubernetes_provider_replaces_pod_without_changing_run_identity():
     assert rebound.workflow_ref == workflow_ref
     assert rebound.sandbox_ref != sandbox_a
     assert len(kubectl.pods) == 1
+    assert len(kubectl.network_policies) == 1
 
 
 def test_terminate_is_orphan_cleanup_safe():
@@ -70,10 +85,76 @@ def test_terminate_is_orphan_cleanup_safe():
     provider.bind(sandbox, session_id="session-1")
 
     provider.terminate(sandbox)
-    # A second cleanup attempt must remain safe because kubectl uses
+    # A second cleanup attempt must remain safe because both resources use
     # --ignore-not-found=true.
     provider.terminate(sandbox)
 
-    delete_calls = [args for args, _ in kubectl.calls if "delete" in args]
-    assert len(delete_calls) == 2
-    assert all("--ignore-not-found=true" in args for args in delete_calls)
+    pod_deletes = [
+        args for args, _ in kubectl.calls
+        if "delete" in args and args[args.index("delete") + 1] == "pod"
+    ]
+    policy_deletes = [
+        args for args, _ in kubectl.calls
+        if "delete" in args and args[args.index("delete") + 1] == "networkpolicy"
+    ]
+    assert len(pod_deletes) == 2
+    assert len(policy_deletes) == 2
+    assert all("--ignore-not-found=true" in args for args in pod_deletes + policy_deletes)
+    assert not kubectl.pods
+    assert not kubectl.network_policies
+
+
+def test_sandbox_manifest_is_non_root_ephemeral_and_network_is_deny_all():
+    kubectl = FakeKubectl()
+    provider = KubernetesSandboxProvider(kubectl=kubectl)
+    sandbox = provider.allocate()
+
+    policy = next(item for item in kubectl.manifests if item["kind"] == "NetworkPolicy")
+    assert policy["spec"]["policyTypes"] == ["Ingress", "Egress"]
+    assert policy["spec"]["ingress"] == []
+    assert policy["spec"]["egress"] == []
+    assert policy["spec"]["podSelector"]["matchLabels"]["agent.sandbox-id"] == sandbox.sandbox_id
+
+    pod = next(item for item in kubectl.manifests if item["kind"] == "Pod")
+    spec = pod["spec"]
+    assert spec["automountServiceAccountToken"] is False
+    assert spec["securityContext"]["runAsNonRoot"] is True
+    container = spec["containers"][0]
+    assert container["securityContext"]["allowPrivilegeEscalation"] is False
+    assert container["securityContext"]["readOnlyRootFilesystem"] is True
+    assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
+    mounts = {mount["mountPath"]: mount["name"] for mount in container["volumeMounts"]}
+    assert mounts == {"/workspace": "workspace", "/tmp": "tmp"}
+    volume_kinds = {
+        volume["name"]: next(iter(set(volume) - {"name"}))
+        for volume in spec["volumes"]
+    }
+    assert volume_kinds == {"workspace": "emptyDir", "tmp": "emptyDir"}
+    assert "persistentVolumeClaim" not in json.dumps(pod)
+    assert "hostPath" not in json.dumps(pod)
+
+    namespace_labels = [
+        args for args, _ in kubectl.calls
+        if "label" in args and "namespace" in args
+    ]
+    assert namespace_labels
+    assert any("pod-security.kubernetes.io/enforce=restricted" in arg for arg in namespace_labels[0])
+
+
+def test_policy_creation_failure_blocks_pod_allocation():
+    class PolicyFailKubectl(FakeKubectl):
+        def __call__(self, args, *, stdin=None):
+            if args[:2] == ["apply", "-f"] and stdin and json.loads(stdin)["kind"] == "NetworkPolicy":
+                self.calls.append((tuple(args), stdin))
+                return KubectlResult(1, "", "policy denied")
+            return super().__call__(args, stdin=stdin)
+
+    kubectl = PolicyFailKubectl()
+    provider = KubernetesSandboxProvider(kubectl=kubectl)
+    try:
+        provider.allocate()
+    except RuntimeError as exc:
+        assert "policy denied" in str(exc)
+    else:
+        raise AssertionError("sandbox allocated without its network policy")
+    assert not kubectl.pods
