@@ -13,6 +13,7 @@ class AsyncWorkflowDriver(Protocol):
         *,
         runtime_run_id: str,
         session_id: str,
+        timeout_seconds: float | None = None,
     ) -> WorkflowRef:
         ...
 
@@ -40,13 +41,20 @@ class InMemoryAsyncWorkflowDriver:
     def __init__(self) -> None:
         self.signals: list[tuple[str, str, dict]] = []
         self.terminated: list[tuple[str, str]] = []
+        self.started: list[dict[str, object]] = []
 
     async def start_run(
         self,
         *,
         runtime_run_id: str,
         session_id: str,
+        timeout_seconds: float | None = None,
     ) -> WorkflowRef:
+        self.started.append({
+            "runtime_run_id": runtime_run_id,
+            "session_id": session_id,
+            "timeout_seconds": timeout_seconds,
+        })
         return WorkflowRef(
             provider=self.name,
             workflow_id=f"workflow-{runtime_run_id}",
@@ -60,14 +68,7 @@ class InMemoryAsyncWorkflowDriver:
         name: str,
         payload: dict,
     ) -> None:
-        self.signals.append(
-            (
-                workflow.workflow_id,
-                name,
-                dict(payload),
-            )
-        )
-
+        self.signals.append((workflow.workflow_id, name, dict(payload)))
 
     async def terminate_run(
         self,
