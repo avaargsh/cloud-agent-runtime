@@ -22,6 +22,7 @@ Evidence rules:
 | R10 | Pause/resume persistence failure | Store state and provider execution do not silently diverge | NOT RUN in this PR |
 | R11 | Real Worker SIGKILL and restart while workflow is waiting / during signal delivery | Same workflow history, no duplicate execution, state reconciliation verified | NOT RUN — requires dedicated integration harness |
 | R12 | In-memory vs SQLite store semantic parity for recovery metadata | Same recovery state and operation ID after store reopen | Implemented SQLite recovery test; CI pending |
+| R13 | Caller subprocess is SIGKILLed after live Temporal accepts start but before canonical Run stores WorkflowRef; new process reopens SQLite and reconciles | Same Run ID + deterministic Workflow ID; exactly one Temporal execution; recovery evidence persists | Covered by `tests/test_temporal_process_recovery.py`; exact-head CI pending. This is a real process-kill-after-acceptance test, not proof of the gRPC response itself being dropped. |
 
 ## Exact-head evidence log
 
@@ -50,3 +51,10 @@ Do not mark R01 passed when only a fake driver or in-process exception is used.
 A live ACK-loss experiment must be run against a disposable Temporal service via a TCP/gRPC fault proxy. The fault proxy must confirm it forwarded the start request and then drop/reset the response before the caller receives it. Run the probe as a subprocess, record its PID, kill it with SIGKILL while the response is blocked, then invoke `reconcile` from a new process against the same state file. The provider's workflow execution list must show exactly one Workflow ID and the returned workflow ref must match it.
 
 Until that exact harness has been executed and the report plus temporal history exported, R01 and R11 remain `NOT RUN`. No CI result from the ordinary pytest matrix may be substituted for that evidence.
+
+
+## Scope distinction: live process kill vs network ACK drop
+
+The dedicated process test launches a separate Python caller against Temporal's local test server. It persists the Run and operation intent in SQLite, waits until Temporal accepts the deterministic Workflow ID, then sends SIGKILL to the caller before the WorkflowRef can be committed to the RuntimeStore. A different process reopens the SQLite file, reconciles by the original Run ID, and checks that Temporal lists exactly one execution.
+
+This proves a real process death after server-side workflow acceptance and before local binding persistence. It does **not** prove the TCP/gRPC response was dropped before the SDK received it. The stricter network-response-drop case remains R01 = `NOT RUN` until a fault proxy demonstrates that exact boundary.
