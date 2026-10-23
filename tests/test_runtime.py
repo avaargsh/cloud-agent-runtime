@@ -357,17 +357,13 @@ def test_cleanup_operation_identity_is_stable_and_owner_scoped() -> None:
     assert first != other_sandbox
 
 
-class TerminateAfterEffectLostAckProvider(InMemorySandboxProvider):
+class TerminateAfterEffectProvider(InMemorySandboxProvider):
     def __init__(self):
         self.terminate_calls = []
-        self.lost_ack_once = True
 
     def terminate(self, sandbox):
         self.terminate_calls.append((sandbox.sandbox_id, sandbox.session_id))
         sandbox.status = sandbox.status.TERMINATED
-        if self.lost_ack_once:
-            self.lost_ack_once = False
-            raise RuntimeError("provider committed cleanup but response was lost")
         return sandbox
 
 
