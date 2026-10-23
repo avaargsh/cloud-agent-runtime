@@ -27,7 +27,7 @@ Evidence rules:
 
 | Commit SHA | Python 3.11 pytest | Python 3.12 pytest | Live process kill | Live Temporal lost-ACK | Artifact / logs |
 |---|---|---|---|---|---|
-| `fdd36af84c0f02a95ff6a2e5f1a895bd121c9057` | PASS — focused recovery matrix (Python 3.11 + 3.12) | PASS — focused recovery matrix (Python 3.11 + 3.12) | NOT RUN | NOT RUN | [P0 acceptance workflow](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39951029309); [full pytest matrix](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39951029298). Artifacts report process/provider scenarios as NOT RUN. |
+| `278354933f36b785d67f63c8b92345ed4731cfdf` | PASS — full pytest matrix | PASS — full pytest matrix | NOT RUN | NOT RUN | [P0 acceptance workflow](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39951104588); [full pytest matrix](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39951104580). Artifacts: [Python 3.11 report](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39951104588), [Python 3.12 report](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39951104588). Live process/provider failure rows remain NOT RUN. |
 
 ## Required commands for process-level experiment
 
