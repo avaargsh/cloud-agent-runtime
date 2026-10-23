@@ -15,6 +15,7 @@ from cloud_agent_runtime.authoritative_identity import (
 )
 from cloud_agent_runtime.authoritative_runtime_security import (
     AuthoritativeRuntimeSecurity,
+    RoleRoutedApprovalTransport,
     RoleRoutedAuthorityTransport,
     build_authoritative_runtime_security,
 )
@@ -84,6 +85,22 @@ def test_role_router_rejects_transport_reuse():
         )
 
 
+def test_approval_router_separates_read_and_revoke_roles():
+    reader = RecordingTransport("approval-reader")
+    revoker = RecordingTransport("approval-revoker")
+    router = RoleRoutedApprovalTransport(reader=reader, revoker=revoker)
+    router.request("GET", "/v1/authorization/approvals/approval-a")
+    router.request(
+        "POST",
+        "/v1/authorization/approvals/approval-a:revoke",
+        {"event_id": "evt-a"},
+    )
+    assert len(reader.calls) == 1
+    assert len(revoker.calls) == 1
+    with pytest.raises(RuntimeError, match="not assigned"):
+        router.request("POST", "/v1/authorization/approvals/approval-a/forbidden", {})
+
+
 def _runtime():
     return AgentRuntime(
         sandbox_provider=InMemorySandboxProvider(),
@@ -92,7 +109,7 @@ def _runtime():
 
 
 def test_production_builder_requires_distinct_role_token_providers():
-    providers = [lambda: f"token-{index}" for index in range(4)]
+    providers = [lambda: f"token-{index}" for index in range(5)]
     bundle = build_authoritative_runtime_security(
         _runtime(),
         authority_base_url="https://identity.example.test",
@@ -110,7 +127,8 @@ def test_production_builder_requires_distinct_role_token_providers():
         issue_service_token_provider=providers[0],
         introspection_service_token_provider=providers[1],
         credential_revocation_token_provider=providers[2],
-        approval_authority_token_provider=providers[3],
+        approval_reader_token_provider=providers[3],
+        approval_revocation_token_provider=providers[4],
     )
     assert isinstance(bundle, AuthoritativeRuntimeSecurity)
     assert isinstance(bundle.runtime._credential_broker, AuthoritativeCredentialBroker)
@@ -121,7 +139,7 @@ def test_production_builder_requires_distinct_role_token_providers():
 
 def test_production_builder_rejects_reused_token_provider_and_plain_http():
     shared = lambda: "same-service-token"
-    providers = [lambda: "issue", lambda: "introspect", lambda: "revoke"]
+    providers = [lambda: "issue", lambda: "introspect", lambda: "revoke", lambda: "approval-reader", lambda: "approval-revoker"]
     common = dict(
         runtime=_runtime(),
         credential_bindings={},
@@ -136,7 +154,8 @@ def test_production_builder_rejects_reused_token_provider_and_plain_http():
             issue_service_token_provider=duplicate,
             introspection_service_token_provider=duplicate,
             credential_revocation_token_provider=providers[1],
-            approval_authority_token_provider=providers[2],
+            approval_reader_token_provider=providers[2],
+            approval_revocation_token_provider=providers[3],
         )
     with pytest.raises(ValueError, match="requires HTTPS"):
         build_authoritative_runtime_security(
@@ -145,7 +164,8 @@ def test_production_builder_rejects_reused_token_provider_and_plain_http():
             issue_service_token_provider=providers[0],
             introspection_service_token_provider=providers[1],
             credential_revocation_token_provider=providers[2],
-            approval_authority_token_provider=lambda: "approval",
+            approval_reader_token_provider=lambda: "approval-reader",
+            approval_revocation_token_provider=lambda: "approval-revoker",
         )
 
 
