@@ -318,7 +318,13 @@ def test_revocation_contract_requires_valid_acknowledgements():
     assert transport.calls[1] == (
         "POST",
         "/v1/workload-credentials:revoke-run",
-        {"run_id": "run-a", "sandbox_revision": 3},
+        {
+            "run_id": "run-a",
+            "sandbox_revision": 3,
+            "event_id": "runtime:run:"
+            + hashlib.sha256(b"run-a").hexdigest()
+            + ":sandbox:3",
+        },
     )
     assert broker.revoke_approval("approval-a") == 1
     transport.responses[("POST", "/v1/workload-credentials:revoke-run")] = {
