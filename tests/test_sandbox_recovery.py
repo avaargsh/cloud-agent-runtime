@@ -856,6 +856,65 @@ def test_cancel_is_durable_and_retry_resends_same_workflow_signal(tmp_path):
     store.close()
 
 
+@pytest.mark.parametrize(
+    ("reason", "event_id", "evidence_refs"),
+    [
+        (
+            "different cancellation reason",
+            "cancel-event-1",
+            ["evidence://ops/cancel"],
+        ),
+        (
+            "operator requested cancellation",
+            "different-event",
+            ["evidence://ops/cancel"],
+        ),
+        (
+            "operator requested cancellation",
+            "cancel-event-1",
+            ["evidence://ops/changed"],
+        ),
+    ],
+)
+def test_cancel_retry_rejects_changed_durable_intent(
+    reason, event_id, evidence_refs
+):
+    workflow = RecordingWorkflowDriver()
+    runtime = AgentRuntime(workflow_driver=workflow)
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+    cancelled = runtime.cancel_run(
+        run.run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-event-1",
+        evidence_refs=["evidence://ops/cancel"],
+    )
+    durable_before_retry = runtime.store.get_run(run.run_id)
+    signal_count_before_retry = len(workflow.signals)
+
+    with pytest.raises(
+        ValueError,
+        match="cancellation retry metadata differs from durable request",
+    ):
+        runtime.cancel_run(
+            run.run_id,
+            reason=reason,
+            event_id=event_id,
+            evidence_refs=evidence_refs,
+        )
+
+    durable_after_retry = runtime.store.get_run(run.run_id)
+    assert durable_after_retry.status == cancelled.status
+    assert durable_after_retry.metadata == durable_before_retry.metadata
+    assert durable_after_retry.transition_events == durable_before_retry.transition_events
+    assert durable_after_retry.evidence_refs == durable_before_retry.evidence_refs
+    assert len(workflow.signals) == signal_count_before_retry
+
+
 class FailOnceCancelWorkflowDriver(RecordingWorkflowDriver):
     def __init__(self):
         super().__init__()
