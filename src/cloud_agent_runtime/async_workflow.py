@@ -66,6 +66,8 @@ class InMemoryAsyncWorkflowDriver:
         self.workflows: dict[str, WorkflowRef] = {}
         self.start_outcome_unknown_once = False
         self.terminate_after_effect_unknown_once = False
+        self.cleanup_outcomes: dict[str, str] = {}
+        self.cleanup_ack_unknown_once = False
 
     async def start_run(
         self,
@@ -131,9 +133,12 @@ class InMemoryAsyncWorkflowDriver:
         reason: str,
         operation_id: str | None = None,
     ) -> None:
+        if operation_id is None:
+            raise ValueError("operation_id is required for retryable workflow termination")
         self.terminated.append((workflow.workflow_id, reason))
+        self.cleanup_outcomes[operation_id] = "terminated"
         if self.terminate_after_effect_unknown_once:
             self.terminate_after_effect_unknown_once = False
             raise RuntimeError(
-                f"simulated termination ACK lost for {operation_id or workflow.workflow_id}"
+                f"simulated termination ACK lost for {operation_id}"
             )
