@@ -897,6 +897,11 @@ def test_cancel_signal_failure_recovers_from_durable_intent(tmp_path):
     assert persisted.metadata["cancel_event_id"] == "cancel-event-stable"
     assert persisted.transition_events[-1]["event_id"] == "cancel-event-stable"
 
+    # Reopen the SQLite store to model a runtime process restart.
+    store.close()
+    store = SQLiteStore(db)
+    runtime = AgentRuntime(store=store, workflow_driver=workflow)
+
     replay = runtime.cancel_run(
         run.run_id,
         reason="operator requested cancellation",
