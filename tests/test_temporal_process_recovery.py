@@ -123,6 +123,16 @@ def test_real_subprocess_sigkill_after_temporal_acceptance_reconciles_sqlite(tmp
                 final_run = json.loads(final_payload)
                 assert final_run["workflow_ref"]["workflow_id"] == workflow_id
                 assert final_run["recovery_state"] == "attached"
-                assert len(final_run["recovery_evidence"]) >= 3
+                outcomes = [
+                    event["outcome"]
+                    for event in final_run["recovery_evidence"]
+                ]
+                # The caller was SIGKILLed after Temporal accepted StartWorkflow
+                # but before the caller could append an "unknown" outcome. The
+                # durable journal must therefore prove the pre-call intent and
+                # the post-restart attachment; a third in-process event is not
+                # a valid requirement for an abruptly killed process.
+                assert outcomes.count("intent_persisted") == 1
+                assert outcomes.count("attached") == 1
 
     asyncio.run(scenario())
