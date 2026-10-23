@@ -853,7 +853,8 @@ def test_cancel_is_durable_and_retry_resends_same_workflow_signal(tmp_path):
     )
     assert replay.transition_events == cancelled.transition_events
     assert [signal[1] for signal in workflow.signals].count("cancel_run") == 2
-    store.close()\n
+    store.close()
+
 
 class FailOnceCancelWorkflowDriver(RecordingWorkflowDriver):
     def __init__(self):
