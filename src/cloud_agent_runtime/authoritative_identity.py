@@ -340,7 +340,7 @@ class AuthoritativeCredentialBroker(CredentialBroker):
             raise IdentityAuthorizationError("credential binding or scopes do not match canonical identity")
 
         needs_approval = any(
-            scope.rsplit(":", 1)[-1].lower() in {"write", "delete", "admin", "mutate"}
+            scope.rsplit(":", 1)[-1].lower() not in ("read", "list", "metadata")
             for scope in requested
         )
         if request.approval_id is not None and not needs_approval:
