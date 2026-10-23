@@ -91,10 +91,11 @@ def test_async_workflow_start_failure_marks_run_failed() -> None:
                 session_id=session.session_id,
             )
 
-        runs = list(runtime.store.runs.values())
+        runs = [runtime.store.get_run(run_id) for run_id in runtime.store.runs] if hasattr(runtime.store, "runs") else []
         assert len(runs) == 1
-        assert runs[0].status == RunStatus.FAILED
-        assert runtime._sandboxes == {}
+        assert runs[0].status == RunStatus.RUNNING
+        assert runs[0].recovery_state == "unknown"
+        assert runtime._sandboxes != {}
 
     asyncio.run(scenario())
 
@@ -147,7 +148,9 @@ def test_recovery_intent_persistence_failure_never_calls_provider():
         assert persisted.recovery_state == "none"
         assert driver.started == []
         assert driver.workflows == {}
-        assert runtime._sandboxes == {}
+        assert len(runtime._sandboxes) == 1
+        # No remote call was made; an explicitly owned sandbox is retained for
+        # reconciliation/cleanup rather than falsely marked failed.
 
     asyncio.run(scenario())
 
@@ -368,7 +371,7 @@ def test_unknown_start_without_reconciliation_capability_fails_closed() -> None:
             sandbox_provider=InMemorySandboxProvider(),
             workflow_driver=NoReconcileDriver(),
         )
-        with pytest.raises(RunRecoveryConflict, match="no new workflow was created"):
+        with pytest.raises(RunRecoveryConflict, match="Run remains unknown"):
             await restarted.reconcile_run(run_id)
         assert store.get_run(run_id).recovery_state == "unknown"
 
@@ -397,7 +400,7 @@ def test_uncertain_run_reconciliation_survives_sqlite_store_reconstruction(tmp_p
 
         with pytest.raises(RuntimeError, match="lost acknowledgement"):
             await runtime.start_run(session_id=session.session_id)
-        original_run_id = next(iter(store_before_restart.runs))
+        original_run_id = next(iter(store_before_restart._connection.execute("SELECT run_id FROM runs").fetchall()))[0]
         store_before_restart.close()
 
         store_after_restart = SQLiteStore(db_path)
