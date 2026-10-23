@@ -659,6 +659,27 @@ class AgentRuntime:
         self.store.save_session(session)
         return session
 
+    def _queue_cancel_sandbox_cleanup(self, run: Run) -> bool:
+        """Persist cleanup intent for the sandbox bound to a cancelled Run."""
+        binding = self._ensure_binding(run)
+        if binding is None or not binding.sandbox_ref:
+            return False
+        if binding.sandbox_ref in binding.pending_cleanup_refs:
+            return False
+        binding.pending_cleanup_refs.append(binding.sandbox_ref)
+        run.sandbox_binding = binding
+        return True
+
+    def _finish_cancel_sandbox_cleanup(self, run_id: str) -> Run:
+        """Retry durable sandbox cleanup and drop terminal Run cache on success."""
+        run = self.cleanup_retired_sandboxes(run_id)
+        binding = run.sandbox_binding
+        if run.status == RunStatus.CANCELLED and (
+            binding is None or not binding.pending_cleanup_refs
+        ):
+            self._sandboxes.pop(run_id, None)
+        return run
+
     def cancel_run(
         self,
         run_id: str,
@@ -667,10 +688,10 @@ class AgentRuntime:
         event_id: str | None = None,
         evidence_refs: list[EvidenceRef | str] | None = None,
     ) -> Run:
-        """Persist cancellation before signaling the external workflow.
+        """Persist cancellation intent, signal the workflow, then retryable cleanup.
 
-        Repeating the same cancellation is safe and retries a previously failed
-        workflow signal without creating a new Run or changing its identity.
+        The canonical Run and its cleanup intent are durable before the workflow
+        signal. Retries must match the original request and reuse its identity.
         """
         run = self.store.get_run(run_id)
         refs = [str(ref) for ref in (evidence_refs or [])]
@@ -690,6 +711,10 @@ class AgentRuntime:
                     raise ValueError(
                         "cancellation retry metadata differs from durable request"
                     )
+            # Also backfill cleanup intent for cancelled Runs persisted before
+            # cleanup was made part of the cancellation contract.
+            if self._queue_cancel_sandbox_cleanup(run):
+                self.store.save_run(run)
             if self.workflow_driver is not None and run.workflow_ref is not None:
                 self.workflow_driver.signal(
                     run.workflow_ref,
@@ -702,7 +727,8 @@ class AgentRuntime:
                         ),
                     },
                 )
-            return run
+            return self._finish_cancel_sandbox_cleanup(run_id)
+
         if run.status in (RunStatus.SUCCEEDED, RunStatus.FAILED):
             raise ValueError(f"terminal run cannot be cancelled: {run.status.value}")
 
@@ -717,6 +743,7 @@ class AgentRuntime:
             ref for ref in (evidence_refs or []) if ref not in run.evidence_refs
         )
         run.metadata = {**dict(run.metadata), **cancellation_metadata}
+        self._queue_cancel_sandbox_cleanup(run)
         self.store.save_run(run)
 
         if self.workflow_driver is not None and run.workflow_ref is not None:
@@ -729,7 +756,7 @@ class AgentRuntime:
                     "evidence_refs": refs,
                 },
             )
-        return run
+        return self._finish_cancel_sandbox_cleanup(run_id)
 
     def complete_run(
         self,
