@@ -1000,3 +1000,67 @@ def test_cancel_cleanup_failure_remains_durable_and_retryable():
     assert replay.sandbox_binding.pending_cleanup_refs == []
     assert provider.terminated_ids == [sandbox_id, sandbox_id]
     assert run.run_id not in runtime._sandboxes
+
+
+class FailOnceCancelCleanupCommitStore(InMemoryStore):
+    def __init__(self):
+        super().__init__()
+        self.failed = False
+
+    def save_run(self, run):
+        binding = run.sandbox_binding
+        if (
+            not self.failed
+            and run.status.value == "cancelled"
+            and binding is not None
+            and binding.pending_cleanup_refs == []
+        ):
+            self.failed = True
+            raise RuntimeError("simulated cancellation cleanup commit failure")
+        return super().save_run(run)
+
+
+def test_cancel_cleanup_commit_failure_retries_without_reallocating_sandbox():
+    provider = CountingSandboxProvider()
+    store = FailOnceCancelCleanupCommitStore()
+    runtime = AgentRuntime(
+        store=store,
+        sandbox_provider=provider,
+        workflow_driver=InMemoryWorkflowDriver(),
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+    original_ref = run.sandbox_ref
+    original_run_id = run.run_id
+    original_sandbox_id = run.sandbox_binding.sandbox_id
+
+    with pytest.raises(
+        RuntimeError,
+        match="simulated cancellation cleanup commit failure",
+    ):
+        runtime.cancel_run(
+            run.run_id,
+            reason="operator requested cancellation",
+            event_id="cancel-cleanup-commit",
+        )
+
+    persisted = store.get_run(original_run_id)
+    assert persisted.status.value == "cancelled"
+    assert persisted.sandbox_binding.pending_cleanup_refs == [original_ref]
+    assert provider.terminated_ids == [original_sandbox_id]
+    allocations_after_failure = len(provider.allocated_ids)
+
+    recovered = runtime.cancel_run(
+        original_run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-cleanup-commit",
+    )
+    assert recovered.run_id == original_run_id
+    assert recovered.sandbox_ref == original_ref
+    assert recovered.sandbox_binding.pending_cleanup_refs == []
+    assert len(provider.allocated_ids) == allocations_after_failure == 1
+    assert provider.terminated_ids == [original_sandbox_id, original_sandbox_id]
