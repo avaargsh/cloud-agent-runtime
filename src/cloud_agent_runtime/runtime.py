@@ -263,6 +263,24 @@ class AgentRuntime:
                     if self._cleanup_ack_unknown_once:
                         self._cleanup_ack_unknown_once = False
                         raise RuntimeError("injected lost cleanup acknowledgement after provider side effect")
+
+                    # Terminate ACK is not enough. Require an independent
+                    # provider query to confirm the resource is actually Gone.
+                    observe_gone = getattr(self.sandbox_provider, "is_gone", None)
+                    if not callable(observe_gone):
+                        raise RuntimeError(
+                            "sandbox provider cannot independently confirm resource Gone"
+                        )
+                    if observe_gone(sandbox_id) is not True:
+                        raise RuntimeError(
+                            "provider has not independently confirmed resource Gone"
+                        )
+                    run.recovery_evidence.append({
+                        "operation_id": operation_id,
+                        "outcome": "observed_gone",
+                        "attempt": str(attempt),
+                        "detail": f"independent provider observation confirms sandbox Gone: {ref}",
+                    })
                 except Exception as exc:
                     remaining.append(ref)
                     run.recovery_state = "unknown"
@@ -270,7 +288,7 @@ class AgentRuntime:
                         "operation_id": operation_id,
                         "outcome": "unknown",
                         "attempt": str(attempt),
-                        "detail": f"cleanup response absent/failed: {type(exc).__name__}: {exc}; ownership retained for retry",
+                        "detail": f"cleanup unresolved after terminate/observation: {type(exc).__name__}: {exc}; ownership retained for retry",
                     })
                     changed = True
                     continue
@@ -281,7 +299,7 @@ class AgentRuntime:
                     "operation_id": operation_id,
                     "outcome": "acknowledged",
                     "attempt": str(attempt),
-                    "detail": f"provider acknowledged terminate for owner_run={run_id}; sandbox_ref={ref}",
+                    "detail": f"provider terminate acknowledged and independent Gone observation recorded for owner_run={run_id}; sandbox_ref={ref}",
                 })
             except Exception as exc:
                 remaining.append(ref)
