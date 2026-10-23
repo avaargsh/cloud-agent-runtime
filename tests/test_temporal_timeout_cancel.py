@@ -6,7 +6,7 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from cloud_agent_runtime.temporal_workflow import AgentRunWorkflow
-from tests.fixtures.temporal_timeout_probe import AgentRunTimeoutProbe
+from temporal_timeout_probe import AgentRunTimeoutProbe
 
 
 def test_temporal_workflow_timeout_is_terminal_and_has_stable_evidence() -> None:
