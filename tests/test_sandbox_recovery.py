@@ -772,3 +772,86 @@ def test_run_identity_cannot_be_rebound_to_another_session(store_kind, tmp_path)
     assert store.get_run("stable-run").session_id == "session-a"
     if isinstance(store, SQLiteStore):
         store.close()
+
+class RecordingWorkflowDriver(InMemoryWorkflowDriver):
+    def __init__(self):
+        super().__init__()
+        self.signals = []
+
+    def signal(self, workflow, *, name: str, payload: dict):
+        self.signals.append((workflow.workflow_id, name, dict(payload)))
+
+
+def test_run_transition_audit_survives_sqlite_restart(tmp_path):
+    db = tmp_path / "transition-audit.db"
+    first_store = SQLiteStore(db)
+    runtime = AgentRuntime(
+        store=first_store,
+        workflow_driver=InMemoryWorkflowDriver(),
+    )
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+    run_id = run.run_id
+
+    completed = runtime.complete_run(
+        run_id,
+        evidence_refs=["evidence://run/complete"],
+    )
+    assert [
+        (event["from_status"], event["to_status"])
+        for event in completed.transition_events
+    ] == [
+        ("created", "running"),
+        ("running", "succeeded"),
+    ]
+    first_store.close()
+
+    second_store = SQLiteStore(db)
+    recovered = second_store.get_run(run_id)
+    assert recovered.status.value == "succeeded"
+    assert recovered.transition_events == completed.transition_events
+    assert recovered.transition_events[-1]["evidence_refs"] == [
+        "evidence://run/complete"
+    ]
+    second_store.close()
+
+
+def test_cancel_is_durable_and_retry_resends_same_workflow_signal(tmp_path):
+    db = tmp_path / "cancel-retry.db"
+    store = SQLiteStore(db)
+    workflow = RecordingWorkflowDriver()
+    runtime = AgentRuntime(store=store, workflow_driver=workflow)
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    run = runtime.start_run(session_id=session.session_id)
+
+    cancelled = runtime.cancel_run(
+        run.run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-event-1",
+        evidence_refs=["evidence://ops/cancel"],
+    )
+    assert cancelled.status.value == "cancelled"
+    assert len(cancelled.transition_events) == 2
+    assert cancelled.transition_events[-1]["event_id"] == "cancel-event-1"
+    assert workflow.signals[-1][1] == "cancel_run"
+    assert workflow.signals[-1][2]["event_id"] == "cancel-event-1"
+
+    # A repeated request retries delivery without adding a second transition.
+    replay = runtime.cancel_run(
+        run.run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-event-1",
+        evidence_refs=["evidence://ops/cancel"],
+    )
+    assert replay.transition_events == cancelled.transition_events
+    assert [signal[1] for signal in workflow.signals].count("cancel_run") == 2
+    store.close()
+
