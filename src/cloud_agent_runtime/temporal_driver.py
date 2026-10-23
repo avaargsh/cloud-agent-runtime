@@ -91,6 +91,17 @@ class TemporalWorkflowDriver:
             f"{runtime_run_id}"
         )
 
+    def reference_for_run(self, runtime_run_id: str) -> WorkflowRef:
+        """Return the stable Workflow ID before issuing the start RPC.
+
+        A caller can persist this reference with the canonical Run so a lost
+        start acknowledgement remains recoverable after process restart.
+        """
+        return WorkflowRef(
+            provider=self.name,
+            workflow_id=self.workflow_id_for(runtime_run_id),
+        )
+
     async def start_run(
         self,
         *,
