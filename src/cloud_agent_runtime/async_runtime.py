@@ -31,7 +31,12 @@ class AsyncAgentRuntime(AgentRuntime):
         )
         self.async_workflow_driver = workflow_driver
 
-    async def _best_effort_terminate_async_workflow(self, workflow) -> bool:
+    async def _best_effort_terminate_async_workflow(
+        self,
+        workflow: WorkflowRef,
+        *,
+        operation_id: str,
+    ) -> bool:
         terminate = getattr(self.async_workflow_driver, "terminate_run", None)
         if terminate is None:
             return False
@@ -39,7 +44,7 @@ class AsyncAgentRuntime(AgentRuntime):
             await terminate(
                 workflow,
                 reason="runtime binding persistence failed",
-                operation_id=f"cleanup-workflow:{workflow.workflow_id}",
+                operation_id=operation_id,
             )
             return True
         except Exception:
@@ -81,6 +86,8 @@ class AsyncAgentRuntime(AgentRuntime):
             ):
                 raise ValueError("budget.max_wall_seconds must be a positive integer")
 
+        # Canonical Run identity and sandbox binding must be persisted before
+        # any remote workflow start is requested.
         run = super().start_run(
             session_id=session_id,
             sandbox_ref=sandbox_ref,
@@ -94,7 +101,10 @@ class AsyncAgentRuntime(AgentRuntime):
             "operation_id": operation_id,
             "outcome": "intent_persisted",
             "attempt": "0",
-            "detail": f"canonical run persisted before provider start; workflow_id=agent-run-{run.run_id}",
+            "detail": (
+                "canonical run persisted before provider start; "
+                f"workflow_id=agent-run-{run.run_id}"
+            ),
         })
         self.store.save_run(run)
 
@@ -108,25 +118,30 @@ class AsyncAgentRuntime(AgentRuntime):
         try:
             workflow_ref = await self.async_workflow_driver.start_run(**start_kwargs)
         except WorkflowStartOutcomeUnknown as exc:
-            # Keep Run recoverable and explicitly unknown. Never convert an
-            # ambiguous provider acknowledgement into FAILED or a new identity.
             self._record_recovery(
                 run,
                 operation_id=operation_id,
                 outcome="unknown",
                 attempt=1,
-                detail=f"provider may have accepted start; workflow_id={exc.workflow_id}; {exc}",
+                detail=(
+                    f"provider may have accepted start; workflow_id={exc.workflow_id}; "
+                    f"{exc}"
+                ),
             )
             raise
         except Exception as exc:
-            # A generic network/provider exception can occur after acceptance;
-            # do not claim a definitive failure without provider reconciliation.
+            # A timeout, connection reset or process cancellation may happen
+            # after the provider accepted the request. Without a provider ACK
+            # or query, do not translate this ambiguity into FAILED.
             self._record_recovery(
                 run,
                 operation_id=operation_id,
                 outcome="unknown",
                 attempt=1,
-                detail=f"start outcome could not be established: {type(exc).__name__}: {exc}",
+                detail=(
+                    f"start outcome could not be established: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
             )
             raise
 
@@ -136,7 +151,10 @@ class AsyncAgentRuntime(AgentRuntime):
             operation_id=operation_id,
             outcome="attached",
             attempt=1,
-            detail=f"provider acknowledged workflow_id={workflow_ref.workflow_id}; provider={workflow_ref.provider}",
+            detail=(
+                f"provider acknowledged workflow_id={workflow_ref.workflow_id}; "
+                f"provider={workflow_ref.provider}"
+            ),
         )
         return self.store.get_run(run.run_id)
 
@@ -145,7 +163,9 @@ class AsyncAgentRuntime(AgentRuntime):
         run = self.store.get_run(run_id)
         operation_id = deterministic_start_operation_id(run.run_id)
         if run.recovery_operation_id not in (None, operation_id):
-            raise RunRecoveryConflict("persisted start operation does not match canonical Run")
+            raise RunRecoveryConflict(
+                "persisted start operation does not match canonical Run"
+            )
         if run.workflow_ref is not None and run.recovery_state == "attached":
             return run
 
@@ -192,7 +212,7 @@ class AsyncAgentRuntime(AgentRuntime):
                 operation_id=operation_id,
                 outcome="unknown",
                 attempt=run.recovery_attempts + 1,
-                detail="provider cannot confirm an execution for deterministic workflow identity; no duplicate was started",
+                detail="provider did not confirm an execution for deterministic workflow identity; no duplicate was started",
             )
             raise RunRecoveryConflict(
                 f"provider cannot prove workflow existence or absence for Run {run_id}"
@@ -204,7 +224,10 @@ class AsyncAgentRuntime(AgentRuntime):
             operation_id=operation_id,
             outcome="attached",
             attempt=run.recovery_attempts + 1,
-            detail=f"reconciled existing workflow_id={workflow_ref.workflow_id}; provider={workflow_ref.provider}",
+            detail=(
+                f"reconciled existing workflow_id={workflow_ref.workflow_id}; "
+                f"provider={workflow_ref.provider}"
+            ),
         )
         return self.store.get_run(run_id)
 
