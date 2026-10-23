@@ -221,7 +221,10 @@ def test_approval_and_run_revocation_invalidate_issued_leases():
             approval_id=grant.approval_id,
         ),
     )
-    secure.revoke_approval(grant.approval_id)
+    # Trusted revocation event fan-out: it updates the authoritative resolver
+    # and invalidates the broker's already-issued approval-bound leases.
+    approvals.revoke(grant.approval_id)
+    broker.revoke_approval(grant.approval_id)
     try:
         broker.validate(lease.access_token, audience=lease.audience)
     except IdentityAuthorizationError:
@@ -314,3 +317,19 @@ def test_configured_binding_not_granted_to_session_cannot_be_used():
         pass
     else:
         raise AssertionError("unconfigured credential binding unexpectedly succeeded")
+
+def test_secured_rebind_rejects_caller_selected_snapshot_reference():
+    _, _, session, _, _, _, secure, principal = make_boundary()
+    run = secure.start_run(principal, session_id=session.session_id)
+
+    try:
+        secure.rebind_run_sandbox(
+            principal,
+            run_id=run.run_id,
+            snapshot_ref="sandbox://kubernetes/another-agents-workspace",
+        )
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("caller-selected snapshot reference was accepted")
+
