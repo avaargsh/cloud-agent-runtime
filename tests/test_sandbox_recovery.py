@@ -143,10 +143,9 @@ def test_sqlite_restart_preserves_binding_and_recovers_same_run(tmp_path):
     first_store.close()
 
     second_store = SQLiteStore(db)
-    restarted_provider = RestartableCleanupProvider(backend=provider.backend)
     restarted = AgentRuntime(
         store=second_store,
-        sandbox_provider=restarted_provider,
+        sandbox_provider=provider,
         workflow_driver=workflow,
     )
     recovered_before = restarted.store.get_run(original_run_id)
@@ -1205,106 +1204,12 @@ def test_cleanup_intent_recovers_after_sqlite_and_runtime_restart(tmp_path):
     assert len(provider.allocated_ids) == 1
     first_store.close()
 
-    # Reconstruct both the SQLite connection and Runtime process facade.
+    # Reconstruct the SQLite connection, Runtime, and provider adapter.
     second_store = SQLiteStore(db)
+    restarted_provider = RestartableCleanupProvider(backend=provider.backend)
     restarted = AgentRuntime(
         store=second_store,
-        sandbox_provider=provider,
-        workflow_driver=InMemoryWorkflowDriver(),
-    )
-    before_retry = second_store.get_run(original_run_id)
-    assert before_retry.run_id == original_run_id
-    assert before_retry.session_id == original_session_id
-    assert before_retry.workflow_ref == original_workflow_ref
-    assert before_retry.sandbox_ref == original_sandbox_ref
-    assert before_retry.status.value == "cancelled"
-    assert before_retry.sandbox_binding.pending_cleanup_refs == [
-        original_sandbox_ref
-    ]
-
-    recovered = restarted.cancel_run(
-        original_run_id,
-        reason="operator requested cancellation",
-        event_id="cancel-before-runtime-restart",
-    )
-    assert recovered.run_id == original_run_id
-    assert recovered.session_id == original_session_id
-    assert recovered.workflow_ref == original_workflow_ref
-    assert recovered.sandbox_ref == original_sandbox_ref
-    assert recovered.status.value == "cancelled"
-    assert recovered.sandbox_binding.pending_cleanup_refs == []
-    assert recovered.metadata["cancel_cleanup_completed_ref"] == original_sandbox_ref
-    assert [
-        (event["from_status"], event["to_status"])
-        for event in recovered.transition_events
-    ] == [("created", "running"), ("running", "cancelled")]
-    assert len(provider.allocated_ids) == 1
-    assert provider.terminated_ids == [original_sandbox_id, original_sandbox_id]
-    second_store.close()
-
-
-
-class RestartableCleanupProvider(InMemorySandboxProvider):
-    """Provider fake whose cleanup fault/state survives Runtime reconstruction."""
-
-    def __init__(self):
-        self.allocated_ids = []
-        self.terminated_ids = []
-        self.failures_remaining = 1
-
-    def allocate(self):
-        sandbox = super().allocate()
-        self.allocated_ids.append(sandbox.sandbox_id)
-        return sandbox
-
-    def terminate(self, sandbox):
-        self.terminated_ids.append(sandbox.sandbox_id)
-        if self.failures_remaining:
-            self.failures_remaining -= 1
-            raise RuntimeError("simulated cleanup outage across runtime restart")
-        return super().terminate(sandbox)
-
-
-def test_cleanup_intent_recovers_after_sqlite_and_runtime_restart(tmp_path):
-    db = tmp_path / "cleanup-restart.db"
-    provider = RestartableCleanupProvider()
-
-    first_store = SQLiteStore(db)
-    first_runtime = AgentRuntime(
-        store=first_store,
-        sandbox_provider=provider,
-        workflow_driver=InMemoryWorkflowDriver(),
-    )
-    session = first_runtime.create_session(
-        agent_id="sre-agent",
-        release_id="release-v1",
-        tenant_id="tenant-a",
-    )
-    run = first_runtime.start_run(session_id=session.session_id)
-    original_run_id = run.run_id
-    original_session_id = run.session_id
-    original_workflow_ref = run.workflow_ref
-    original_sandbox_ref = run.sandbox_ref
-    original_sandbox_id = run.sandbox_binding.sandbox_id
-
-    cancelled = first_runtime.cancel_run(
-        original_run_id,
-        reason="operator requested cancellation",
-        event_id="cancel-before-runtime-restart",
-    )
-    assert cancelled.status.value == "cancelled"
-    assert cancelled.sandbox_binding.pending_cleanup_refs == [
-        original_sandbox_ref
-    ]
-    assert provider.terminated_ids == [original_sandbox_id]
-    assert len(provider.allocated_ids) == 1
-    first_store.close()
-
-    # Reconstruct both the SQLite connection and Runtime process facade.
-    second_store = SQLiteStore(db)
-    restarted = AgentRuntime(
-        store=second_store,
-        sandbox_provider=provider,
+        sandbox_provider=restarted_provider,
         workflow_driver=InMemoryWorkflowDriver(),
     )
     before_retry = second_store.get_run(original_run_id)
