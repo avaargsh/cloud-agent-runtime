@@ -25,22 +25,12 @@ class AsyncAgentRuntime(AgentRuntime):
         )
         self.async_workflow_driver = workflow_driver
 
-    async def _best_effort_terminate_async_workflow(
-        self,
-        workflow,
-    ) -> bool:
-        terminate = getattr(
-            self.async_workflow_driver,
-            "terminate_run",
-            None,
-        )
+    async def _best_effort_terminate_async_workflow(self, workflow) -> bool:
+        terminate = getattr(self.async_workflow_driver, "terminate_run", None)
         if terminate is None:
             return False
         try:
-            await terminate(
-                workflow,
-                reason="runtime binding persistence failed",
-            )
+            await terminate(workflow, reason="runtime binding persistence failed")
             return True
         except Exception:
             return False
@@ -52,28 +42,33 @@ class AsyncAgentRuntime(AgentRuntime):
         sandbox_ref: str | None = None,
         budget: Budget | None = None,
     ) -> Run:
-        # super().start_run persists the canonical Run and Sandbox binding
-        # before this async workflow provider creates an external side effect.
+        if budget is not None:
+            timeout = budget.max_wall_seconds
+            if timeout is not None and (
+                isinstance(timeout, bool)
+                or not isinstance(timeout, int)
+                or timeout <= 0
+            ):
+                raise ValueError("budget.max_wall_seconds must be a positive integer")
+
+        # Persist the canonical Run before creating the external workflow.
         run = super().start_run(
             session_id=session_id,
             sandbox_ref=sandbox_ref,
             budget=budget,
         )
-
         try:
-            workflow_ref = (
-                await self.async_workflow_driver.start_run(
-                    runtime_run_id=run.run_id,
-                    session_id=session_id,
-                )
-            )
+            start_kwargs = {
+                "runtime_run_id": run.run_id,
+                "session_id": session_id,
+            }
+            if budget is not None and budget.max_wall_seconds is not None:
+                start_kwargs["timeout_seconds"] = float(budget.max_wall_seconds)
+            workflow_ref = await self.async_workflow_driver.start_run(**start_kwargs)
         except Exception:
             run.status = RunStatus.FAILED
             self._best_effort_save_failed_run(run)
-            current = self._sandboxes.pop(
-                run.run_id,
-                None,
-            )
+            current = self._sandboxes.pop(run.run_id, None)
             if current is not None:
                 self._best_effort_terminate(current)
             raise
@@ -82,24 +77,15 @@ class AsyncAgentRuntime(AgentRuntime):
         try:
             self.store.save_run(run)
         except Exception:
-            terminated = (
-                await self._best_effort_terminate_async_workflow(
-                    workflow_ref
-                )
-            )
+            terminated = await self._best_effort_terminate_async_workflow(workflow_ref)
             run.status = RunStatus.FAILED
             if terminated:
                 run.workflow_ref = None
             self._best_effort_save_failed_run(run)
-
-            current = self._sandboxes.pop(
-                run.run_id,
-                None,
-            )
+            current = self._sandboxes.pop(run.run_id, None)
             if current is not None:
                 self._best_effort_terminate(current)
             raise
-
         return run
 
     async def resolve_approval(
@@ -118,7 +104,6 @@ class AsyncAgentRuntime(AgentRuntime):
             actor=actor,
             reason=reason,
         )
-
         run = self.store.get_run(run_id)
         if run.workflow_ref is not None:
             await self.async_workflow_driver.signal(
@@ -126,16 +111,10 @@ class AsyncAgentRuntime(AgentRuntime):
                 name="approval_resolved",
                 payload={
                     "approval_id": approval_id,
-                    "approved": (
-                        approval.status
-                        == ApprovalStatus.APPROVED
-                    ),
+                    "approved": approval.status == ApprovalStatus.APPROVED,
                     "actor": approval.actor,
                     "reason": approval.reason,
-                    "evidence_refs": list(
-                        approval.evidence_refs
-                    ),
+                    "evidence_refs": list(approval.evidence_refs),
                 },
             )
-
         return approval
