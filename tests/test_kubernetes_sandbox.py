@@ -15,10 +15,12 @@ class FakeKubectl:
     def __call__(self, args, *, stdin=None):
         self.calls.append((tuple(args), stdin))
         if args[:2] == ["get", "namespace"]:
+            if args[2] in self.namespaces:
+                return KubectlResult(0, args[2], "")
             return KubectlResult(
-                0 if args[2] in self.namespaces else 1,
+                1,
                 "",
-                "",
+                f'Error from server (NotFound): namespaces "{args[2]}" not found',
             )
         if args[:2] == ["create", "namespace"]:
             self.namespaces.add(args[2])
@@ -129,9 +131,11 @@ def test_terminate_is_orphan_cleanup_safe():
         args for args, _ in kubectl.calls
         if args[:2] == ["delete", "namespace"]
     ]
-    assert len(pod_deletes) == 2
-    assert len(policy_deletes) == 2
-    assert len(namespace_deletes) == 2
+    # The second call detects the missing namespace and exits without trying
+    # to mutate namespaced resources that no longer exist.
+    assert len(pod_deletes) == 1
+    assert len(policy_deletes) == 1
+    assert len(namespace_deletes) == 1
     assert all("--ignore-not-found=true" in args for args in pod_deletes + policy_deletes + namespace_deletes)
     assert not kubectl.pods
     assert not kubectl.network_policies
