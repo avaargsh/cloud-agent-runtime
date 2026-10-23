@@ -368,7 +368,7 @@ class TerminateAfterEffectProvider(InMemorySandboxProvider):
 
 
 def test_cleanup_lost_ack_is_retryable_with_same_operation_and_evidence() -> None:
-    provider = TerminateAfterEffectLostAckProvider()
+    provider = TerminateAfterEffectProvider()
     rt = AgentRuntime(
         sandbox_provider=provider,
         workflow_driver=InMemoryWorkflowDriver(),
