@@ -65,28 +65,9 @@ class KubernetesSandboxProvider:
             ) from exc
         return KubectlResult(result.returncode, result.stdout, result.stderr)
 
-    def _check(self, args: list[str], *, stdin: str | None = None) -> KubectlResult:
-        result = self._kubectl(args, stdin=stdin)
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"kubectl {' '.join(args)} failed: {result.stderr.strip()}"
-            )
-        return result
-
-    def _delete_namespace_best_effort(self, namespace: str) -> None:
-        try:
-            self._kubectl([
-                "delete", "namespace", namespace,
-                "--ignore-not-found=true", "--wait=false",
-            ])
-        except Exception:
-            # Preserve the primary allocation error. Reconciliation must retry
-            # orphan cleanup if the Kubernetes API was unavailable.
-            pass
-
     def ensure_namespace(self, namespace: str | None = None) -> None:
         target = namespace or self.namespace
-        probe = self._kubectl(["get", "namespace", target, "-o", "name"])
+        probe = self._invoke_kubectl(["get", "namespace", target, "-o", "name"])
         created = False
         if probe.returncode != 0:
             self._check(["create", "namespace", target])
@@ -236,7 +217,7 @@ class KubernetesSandboxProvider:
 
     def terminate(self, sandbox: Sandbox) -> Sandbox:
         namespace = self._namespace_for(sandbox.sandbox_id)
-        probe = self._kubectl(["get", "namespace", namespace, "-o", "name"])
+        probe = self._invoke_kubectl(["get", "namespace", namespace, "-o", "name"])
         if probe.returncode != 0:
             if "not found" in probe.stderr.lower():
                 # Idempotent cleanup after an earlier namespace deletion.
