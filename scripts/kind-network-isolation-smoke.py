@@ -119,6 +119,7 @@ try:
     run = runtime.start_run(session_id=session.session_id)
     sandbox_a = runtime._sandboxes[run.run_id]
     sandbox_a_id = sandbox_a.sandbox_id
+    sandbox_a_ref = run.sandbox_ref
     sandbox_a_namespace = provider._namespace_for(sandbox_a_id)
     k(
         "-n", sandbox_a_namespace, "wait",
@@ -223,7 +224,7 @@ try:
         raise RuntimeError("expected cleanup failure injection was not exercised")
     if rebound.run_id != run.run_id or rebound.session_id != session.session_id:
         raise RuntimeError("recovery changed canonical Run or Session identity")
-    if rebound.sandbox_ref == run.sandbox_ref:
+    if rebound.sandbox_ref == sandbox_a_ref:
         raise RuntimeError("recovery did not select a new sandbox binding")
     if (
         rebound.sandbox_binding is None
