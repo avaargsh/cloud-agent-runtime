@@ -191,25 +191,38 @@ class AuthorizedAgentRuntime:
 
         return self._credential_broker.issue(identity, binding, request, approval)
 
+    @staticmethod
+    def _sandbox_revision(run: Run) -> int:
+        binding = run.sandbox_binding
+        if binding is None or type(binding.revision) is not int or binding.revision <= 0:
+            raise IdentityAuthorizationError("Run has no canonical sandbox revision to revoke")
+        return binding.revision
+
+    def _revoke_run_revision(self, run: Run) -> int:
+        return self._credential_broker.revoke_run(
+            run.run_id,
+            sandbox_revision=self._sandbox_revision(run),
+        )
+
     def revoke_run_credentials(
         self,
         principal: AuthenticatedPrincipal,
         *,
         run_id: str,
     ) -> int:
-        self._owned_run(principal, run_id)
-        return self._credential_broker.revoke_run(run_id)
+        run, _ = self._owned_run(principal, run_id)
+        return self._revoke_run_revision(run)
 
     def pause_run(self, principal: AuthenticatedPrincipal, *, run_id: str) -> Run:
-        self._owned_run(principal, run_id)
-        self._credential_broker.revoke_run(run_id)
+        run, _ = self._owned_run(principal, run_id)
+        self._revoke_run_revision(run)
         return self._runtime.pause_run(run_id)
 
     def resume_run(self, principal: AuthenticatedPrincipal, *, run_id: str) -> Run:
-        _, session = self._owned_run(principal, run_id)
+        run, session = self._owned_run(principal, run_id)
         if session.status != SessionStatus.ACTIVE:
             raise IdentityAuthorizationError("cannot resume a Run in an inactive session")
-        self._credential_broker.revoke_run(run_id)
+        self._revoke_run_revision(run)
         return self._runtime.resume_run(run_id)
 
     def rebind_run_sandbox(
@@ -224,7 +237,7 @@ class AuthorizedAgentRuntime:
             raise IdentityAuthorizationError("cannot rebind a Run in an inactive session")
         if run.status != RunStatus.RUNNING:
             raise IdentityAuthorizationError("sandbox rebind requires a running Run")
-        self._credential_broker.revoke_run(run_id)
+        self._revoke_run_revision(run)
         # Snapshot refs are taken only from canonical persisted state. Accepting
         # a caller-selected ref could attach another Run's checkpoint/workspace.
         snapshot_ref = run.sandbox_snapshot_ref
@@ -285,8 +298,8 @@ class AuthorizedAgentRuntime:
         event_id: str | None = None,
         evidence_refs=None,
     ) -> Run:
-        self._owned_run(principal, run_id)
-        self._credential_broker.revoke_run(run_id)
+        run, _ = self._owned_run(principal, run_id)
+        self._revoke_run_revision(run)
         cancel = getattr(self._runtime, "cancel_run", None)
         if cancel is None:
             raise RuntimeError("wrapped runtime does not implement cancellation")

@@ -485,11 +485,13 @@ class AuthoritativeCredentialBroker(CredentialBroker):
             raise AuthorityProtocolError("credential revocation acknowledgement is invalid")
         return revoked
 
-    def revoke_run(self, run_id: str) -> int:
+    def revoke_run(self, run_id: str, *, sandbox_revision: int) -> int:
+        if type(sandbox_revision) is not int or sandbox_revision <= 0:
+            raise ValueError("sandbox_revision must be a positive integer")
         response = self.transport.request(
             "POST",
             "/v1/workload-credentials:revoke-run",
-            {"run_id": run_id},
+            {"run_id": run_id, "sandbox_revision": sandbox_revision},
         )
         return _revoked_count(response)
 

@@ -306,13 +306,18 @@ def test_revocation_contract_requires_valid_acknowledgements():
         "revoked_count": 1
     }
     assert broker.revoke_credential("cred-001") is True
-    assert broker.revoke_run("run-a") == 2
+    assert broker.revoke_run("run-a", sandbox_revision=3) == 2
+    assert transport.calls[-2] == (
+        "POST",
+        "/v1/workload-credentials:revoke-run",
+        {"run_id": "run-a", "sandbox_revision": 3},
+    )
     assert broker.revoke_approval("approval-a") == 1
     transport.responses[("POST", "/v1/workload-credentials:revoke-run")] = {
         "revoked_count": -1
     }
     with pytest.raises(AuthorityProtocolError):
-        broker.revoke_run("run-a")
+        broker.revoke_run("run-a", sandbox_revision=3)
 
 
 def test_authoritative_approval_resolver_reloads_live_state_and_checks_expiry():
@@ -341,6 +346,12 @@ def test_authoritative_approval_resolver_reloads_live_state_and_checks_expiry():
     assert resolver.get_approved_grant("approval-a") is None
     transport.errors[("GET", path)] = AuthorityNotFoundError(404)
     assert resolver.get_approved_grant("approval-a") is None
+
+
+def test_run_revocation_requires_a_canonical_positive_sandbox_revision():
+    broker = make_broker(FakeTransport())
+    with pytest.raises(ValueError, match="sandbox_revision"):
+        broker.revoke_run("run-a", sandbox_revision=0)
 
 
 def test_revocation_fanout_revokes_authority_before_existing_leases():
@@ -443,4 +454,61 @@ def test_untrusted_revocation_event_is_denied_before_any_authority_mutation():
             source="caller-controlled",
         ))
     assert transport.calls == []
+
+def test_run_revocation_fences_old_sandbox_assertions_but_allows_new_revision():
+    clock = FakeClock()
+    transport = FakeTransport()
+    assertion = FakeAssertionIssuer()
+    broker = AuthoritativeCredentialBroker(
+        transport=transport,
+        assertion_issuer=assertion,
+        clock=clock,
+    )
+    request1 = CredentialRequest(
+        request_id="revision-3-before-fence",
+        binding_id="github-binding",
+        scopes=("github:read",),
+        ttl_seconds=20,
+    )
+    transport.responses[("POST", "/v1/workload-credentials:issue")] = broker_response()
+    broker.issue(identity(), binding(), request1)
+    broker.revoke_run("run-a", sandbox_revision=3)
+
+    stale = identity()
+    with pytest.raises(IdentityAuthorizationError):
+        broker.issue(
+            stale,
+            binding(),
+            CredentialRequest(
+                request_id="revision-3-after-fence",
+                binding_id="github-binding",
+                scopes=("github:read",),
+                ttl_seconds=20,
+            ),
+        )
+    newer = WorkloadIdentity(
+        **{
+            **identity_payload(),
+            "sandbox_id": "sandbox-b",
+            "sandbox_revision": 4,
+            "workspace_ref": "sandbox://kubernetes/sandbox-b",
+        }
+    )
+    transport.responses[("POST", "/v1/workload-credentials:issue")] = broker_response(
+        expires_at=10_020.0
+    )
+    transport.responses[("POST", "/v1/workload-credentials:issue")]["credential"].update(
+        {"sandbox_id": "sandbox-b", "sandbox_revision": 4}
+    )
+    lease = broker.issue(
+        newer,
+        binding(),
+        CredentialRequest(
+            request_id="revision-4-after-fence",
+            binding_id="github-binding",
+            scopes=("github:read",),
+            ttl_seconds=20,
+        ),
+    )
+    assert lease.run_id == "run-a"
 

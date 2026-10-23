@@ -176,7 +176,7 @@ class CredentialBroker(Protocol):
     def revoke_credential(self, credential_id: str) -> bool:
         ...
 
-    def revoke_run(self, run_id: str) -> int:
+    def revoke_run(self, run_id: str, *, sandbox_revision: int) -> int:
         ...
 
     def revoke_approval(
@@ -251,6 +251,7 @@ class InMemoryCredentialBroker:
         self._token_index: dict[str, str] = {}
         self._consumed_request_ids: set[tuple[str, str, str]] = set()
         self._revoked_approvals: set[str] = set()
+        self._run_fences: dict[str, int] = {}
         self._lock = threading.RLock()
 
     def issue(
@@ -309,6 +310,8 @@ class InMemoryCredentialBroker:
             now = self._clock()
             if identity.expires_at <= now or expires_at <= now:
                 raise CredentialExpiredError("identity, approval, or credential has expired")
+            if identity.sandbox_revision <= self._run_fences.get(identity.run_id, 0):
+                raise IdentityAuthorizationError("workload identity sandbox revision has been fenced")
             if needs_approval and approval is not None and (
                 approval.expires_at <= now
                 or approval.approval_id in self._revoked_approvals
@@ -366,6 +369,8 @@ class InMemoryCredentialBroker:
                 raise CredentialExpiredError("credential has expired")
             if record.approval_id in self._revoked_approvals:
                 raise IdentityAuthorizationError("credential approval has been revoked")
+            if record.identity.sandbox_revision <= self._run_fences.get(record.identity.run_id, 0):
+                raise IdentityAuthorizationError("credential sandbox revision has been fenced")
             if audience != record.audience:
                 raise IdentityAuthorizationError("credential audience mismatch")
             if set(required_scopes) - set(record.scopes):
@@ -380,11 +385,21 @@ class InMemoryCredentialBroker:
             record.revoked = True
             return True
 
-    def revoke_run(self, run_id: str) -> int:
+    def revoke_run(self, run_id: str, *, sandbox_revision: int) -> int:
+        if type(sandbox_revision) is not int or sandbox_revision <= 0:
+            raise ValueError("sandbox_revision must be a positive integer")
         with self._lock:
+            self._run_fences[run_id] = max(
+                sandbox_revision,
+                self._run_fences.get(run_id, 0),
+            )
             count = 0
             for record in self._records.values():
-                if record.identity.run_id == run_id and not record.revoked:
+                if (
+                    record.identity.run_id == run_id
+                    and record.identity.sandbox_revision <= self._run_fences[run_id]
+                    and not record.revoked
+                ):
                     record.revoked = True
                     count += 1
             return count
