@@ -33,19 +33,26 @@ jobs:
           kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.33.0/manifests/custom-resources.yaml
           kubectl -n tigera-operator rollout status deployment/tigera-operator --timeout=180s
           kubectl get installation.operator.tigera.io default -o yaml
-          calico_namespace_ready=0
-          for attempt in $(seq 1 90); do
-            if kubectl get namespace calico-system >/dev/null 2>&1; then
-              calico_namespace_ready=1
+          # The operator creates the namespace before it finishes reconciling
+          # its workloads. Wait for both the namespace and the expected resources,
+          # otherwise rollout status can fail with a transient NotFound.
+          calico_resources_ready=0
+          for attempt in $(seq 1 120); do
+            if kubectl get namespace calico-system >/dev/null 2>&1 \
+              && kubectl -n calico-system get daemonset calico-node >/dev/null 2>&1 \
+              && kubectl -n calico-system get deployment calico-kube-controllers >/dev/null 2>&1; then
+              calico_resources_ready=1
               break
             fi
             sleep 2
           done
-          if [ "$calico_namespace_ready" -ne 1 ]; then
-            echo "Calico operator did not create calico-system" >&2
-            kubectl get tigerastatus
-            kubectl get installation.operator.tigera.io default -o yaml
-            kubectl -n tigera-operator logs deployment/tigera-operator --tail=120
+          if [ "$calico_resources_ready" -ne 1 ]; then
+            echo "Calico operator did not reconcile the expected CNI workloads" >&2
+            kubectl get tigerastatus || true
+            kubectl get installation.operator.tigera.io default -o yaml || true
+            kubectl get namespace calico-system -o yaml || true
+            kubectl -n calico-system get all -o wide || true
+            kubectl -n tigera-operator logs deployment/tigera-operator --tail=120 || true
             exit 1
           fi
           kubectl -n calico-system rollout status daemonset/calico-node --timeout=240s
