@@ -1,50 +1,30 @@
 # Persistence
 
-The reference runtime now supports a durable local SQLite store in addition to the in-memory store.
+The reference runtime supports a durable local SQLite store in addition to the in-memory store. The RuntimeStore interface keeps lifecycle code independent of the storage implementation.
 
-## Why a store interface
+## Independent persistence guarantees
 
-Canonical Agent state must survive:
+Identity, state, workspace and execution persistence are separate contracts:
 
-- API process restarts,
-- harness/provider changes,
-- sandbox pause/resume,
-- long approval waits,
-- durable workflow execution.
+- **Identity:** canonical Agent, Session, Run and task relationships survive process/provider replacement.
+- **State:** lifecycle transitions, approvals, provider references, operation IDs, retry metadata and evidence references survive store reopen.
+- **Workspace:** required files, checkpoints and user deliverables live in a durable workspace/artifact backend, not only inside a disposable sandbox.
+- **Execution:** pending waits, timers, signals, retry state and workflow result survive Worker replacement through Temporal history and deterministic reconciliation.
 
-The runtime therefore depends on a small `RuntimeStore` interface rather than a process-local dictionary.
+One does not imply another. A Run row is not proof that the workflow resumes; a snapshot reference is not proof the bytes exist; a replayable workflow is not proof that workspace data was retained.
 
 ## SQLite reference adapter
 
-`SQLiteStore` persists JSON representations of:
+`SQLiteStore` persists JSON representations of Session identity/status, provider/state references, CapabilityBindings, Run lifecycle, sandbox/snapshot references, WorkflowRef, ArtifactRef/EvidenceRef, approvals, budget and metadata.
 
-- Session identity and status,
-- provider/state references,
-- CapabilityBindings,
-- Run lifecycle,
-- sandbox and snapshot references,
-- WorkflowRef,
-- ArtifactRef / EvidenceRef,
-- approvals,
-- budget,
-- metadata.
-
-This adapter is intentionally small and suitable for local development and contract testing.
-
-A production implementation can replace it with PostgreSQL while preserving the runtime-facing store interface.
+SQLite is intended for local development and contract/failure-injection tests. It is not a substitute for a multi-replica production database with operational backup, restore, migration, high-availability and concurrency acceptance.
 
 ## Artifact store
 
 `LocalArtifactStore` provides a filesystem-backed reference implementation:
 
 ```text
-bytes/text
-   |
-SHA-256
-   |
-durable file
-   |
-ArtifactRef
+bytes/text -> SHA-256 -> durable file -> ArtifactRef
 ```
 
-The application stores references in Run state instead of copying large artifact payloads into transactional rows.
+The runtime stores references instead of copying large artifact payloads into transactional rows. Production workspace durability still requires a separately operated storage backend, access control, retention policy and digest verification.
