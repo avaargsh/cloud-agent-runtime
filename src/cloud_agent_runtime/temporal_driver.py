@@ -1,10 +1,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 from typing import Any
 
 from .workflow import WorkflowRef
+
+
+def deterministic_start_operation_id(runtime_run_id: str) -> str:
+    """Stable provider-start operation identity, independent of attempts."""
+    if not runtime_run_id or not runtime_run_id.strip():
+        raise ValueError("runtime_run_id must be non-empty")
+    return f"agent-run-start:{runtime_run_id}"
+
+
+def deterministic_cleanup_operation_id(run_id: str, sandbox_ref: str) -> str:
+    """Stable cleanup identity bound to its owner Run and sandbox reference."""
+    if not run_id or not run_id.strip():
+        raise ValueError("run_id must be non-empty")
+    if not sandbox_ref or not sandbox_ref.strip():
+        raise ValueError("sandbox_ref must be non-empty")
+    return f"sandbox-cleanup:{run_id}:{sandbox_ref}"
 
 
 _TERMINAL_WORKFLOW_STATUSES = {
@@ -28,7 +43,9 @@ def _workflow_status_name(status: Any) -> str:
     if status is None:
         return ""
     name = getattr(status, "name", None)
-    value = name.upper() if isinstance(name, str) and name else str(status).upper()
+    if isinstance(name, str) and name:
+        return name.upper()
+    value = str(status).upper()
     if "." in value:
         value = value.rsplit(".", 1)[-1]
     if value.startswith("WORKFLOW_EXECUTION_STATUS_"):
@@ -97,13 +114,6 @@ class TemporalWorkflowDriver:
         session_id: str,
         timeout_seconds: float | None = None,
     ) -> WorkflowRef:
-        if timeout_seconds is not None and (
-            isinstance(timeout_seconds, bool)
-            or not isinstance(timeout_seconds, (int, float))
-            or not math.isfinite(float(timeout_seconds))
-            or timeout_seconds <= 0
-        ):
-            raise ValueError("timeout_seconds must be a finite positive number")
         workflow_id = self.workflow_id_for(
             runtime_run_id
         )
@@ -124,14 +134,8 @@ class TemporalWorkflowDriver:
                     {
                         "runtime_run_id": runtime_run_id,
                         "session_id": session_id,
-                        **(
-                            {
-                                "timeout_seconds": timeout_seconds,
-                                "timeout_event_id": f"timeout:{runtime_run_id}",
-                            }
-                            if timeout_seconds is not None
-                            else {}
-                        ),
+                        "timeout_seconds": timeout_seconds,
+                        "start_operation_id": deterministic_start_operation_id(runtime_run_id),
                     }
                 ],
                 id=workflow_id,
@@ -175,6 +179,52 @@ class TemporalWorkflowDriver:
                 "first_execution_run_id",
                 None,
             ),
+        )
+
+    async def reconcile_start(
+        self,
+        *,
+        runtime_run_id: str,
+        session_id: str,
+        operation_id: str,
+        timeout_seconds: float | None = None,
+    ) -> WorkflowRef | None:
+        expected_operation_id = deterministic_start_operation_id(runtime_run_id)
+        if operation_id != expected_operation_id:
+            raise ValueError("start operation identity does not match canonical Run")
+        workflow_id = self.workflow_id_for(runtime_run_id)
+        handle = self.client.get_workflow_handle(workflow_id)
+        describe = getattr(handle, "describe", None)
+        if describe is None:
+            raise TemporalWorkflowConflict(
+                f"cannot reconcile workflow start without status lookup: {workflow_id}"
+            )
+        try:
+            description = await describe()
+        except Exception as exc:
+            raise TemporalWorkflowConflict(
+                f"workflow start outcome remains unknown for {workflow_id}"
+            ) from exc
+        status = getattr(description, "status", None)
+        if isinstance(description, dict):
+            status = description.get("status")
+        if not status:
+            raise TemporalWorkflowConflict(
+                f"workflow start outcome remains unknown; status unavailable: {workflow_id}"
+            )
+        if _workflow_is_terminal(status):
+            # The canonical Run may still have an ambiguous start outcome,
+            # but a terminal execution must never be projected as an active
+            # attachment. A separate terminal-result reconciliation path may
+            # update the canonical terminal state; start recovery fails closed.
+            raise TemporalWorkflowConflict(
+                "existing Temporal workflow is terminal: "
+                f"{workflow_id} status={_workflow_status_name(status)}"
+            )
+        return WorkflowRef(
+            provider=self.name,
+            workflow_id=workflow_id,
+            run_id=getattr(handle, "first_execution_run_id", None),
         )
 
     async def signal(
@@ -230,56 +280,6 @@ class TemporalWorkflowDriver:
                 workflow.workflow_id,
             )
 
-        if name == "run_state":
-            # A terminal execution no longer needs a live Worker to serve a
-            # query. Read its persisted result directly, avoiding a query that
-            # can wait on a workflow task which will never be polled again.
-            try:
-                description = await handle.describe()
-                status = getattr(description, "status", None)
-                if isinstance(description, dict):
-                    status = description.get("status")
-                if _workflow_is_terminal(status):
-                    result = await handle.result()
-                    if isinstance(result, dict) and "phase" in result:
-                        phase = str(result["phase"])
-                        return {
-                            **result,
-                            "paused": phase == "paused",
-                            "terminal": True,
-                            "approval_events": list(
-                                result.get("approval_events", [])
-                            ),
-                        }
-            except Exception:
-                # The live query below may still work if describe/result is
-                # temporarily unavailable or the execution is nonterminal.
-                pass
-
-        try:
-            if args is None:
-                return await handle.query(name)
-            return await handle.query(name, args)
-        except Exception:
-            if name != "run_state":
-                raise
-
-            # Close can race the first describe/query. Re-check durable status
-            # before deciding whether the query error should be propagated.
-            description = await handle.describe()
-            status = getattr(description, "status", None)
-            if isinstance(description, dict):
-                status = description.get("status")
-            if not _workflow_is_terminal(status):
-                raise
-
-            result = await handle.result()
-            if not isinstance(result, dict) or "phase" not in result:
-                raise
-            phase = str(result["phase"])
-            return {
-                **result,
-                "paused": phase == "paused",
-                "terminal": True,
-                "approval_events": list(result.get("approval_events", [])),
-            }
+        if args is None:
+            return await handle.query(name)
+        return await handle.query(name, args)
