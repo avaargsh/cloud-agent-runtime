@@ -248,9 +248,12 @@ class KubernetesSandboxProvider:
             "-n", namespace, "delete", "networkpolicy", "default-deny-all",
             "--ignore-not-found=true", "--wait=false",
         ])
+        # Do not acknowledge termination until Kubernetes confirms the
+        # namespace (and its ephemeral workspace) has disappeared. A timeout
+        # raises so the runtime can retain cleanup intent and retry.
         self._check([
             "delete", "namespace", namespace,
-            "--ignore-not-found=true", "--wait=false",
+            "--ignore-not-found=true", "--wait=true", "--timeout=60s",
         ])
         sandbox.status = SandboxStatus.TERMINATED
         return sandbox
