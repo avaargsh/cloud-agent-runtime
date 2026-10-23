@@ -32,6 +32,22 @@ jobs:
           kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.33.0/manifests/tigera-operator.yaml
           kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.33.0/manifests/custom-resources.yaml
           kubectl -n tigera-operator rollout status deployment/tigera-operator --timeout=180s
+          kubectl get installation.operator.tigera.io default -o yaml
+          calico_namespace_ready=0
+          for attempt in $(seq 1 90); do
+            if kubectl get namespace calico-system >/dev/null 2>&1; then
+              calico_namespace_ready=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$calico_namespace_ready" -ne 1 ]; then
+            echo "Calico operator did not create calico-system" >&2
+            kubectl get tigerastatus
+            kubectl get installation.operator.tigera.io default -o yaml
+            kubectl -n tigera-operator logs deployment/tigera-operator --tail=120
+            exit 1
+          fi
           kubectl -n calico-system rollout status daemonset/calico-node --timeout=240s
           kubectl -n calico-system rollout status deployment/calico-kube-controllers --timeout=240s
           kubectl wait --for=condition=Ready nodes --all --timeout=240s
