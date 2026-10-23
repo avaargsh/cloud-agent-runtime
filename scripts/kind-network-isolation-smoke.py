@@ -33,8 +33,12 @@ def command(args: list[str], *, stdin: str | None = None, timeout: int = 30):
     return result.stdout.strip()
 
 
-def k(*args: str, timeout: int = 30) -> str:
-    return command(["kubectl", *args], timeout=timeout)
+def k(
+    *args: str,
+    timeout: int = 30,
+    stdin: str | None = None,
+) -> str:
+    return command(["kubectl", *args], stdin=stdin, timeout=timeout)
 
 
 def wait_namespace_gone(namespace: str) -> None:
