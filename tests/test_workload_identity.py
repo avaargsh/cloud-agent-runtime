@@ -149,6 +149,21 @@ def test_credential_audience_and_scopes_come_from_server_binding():
         else:
             raise AssertionError("audience/scope tampering unexpectedly succeeded")
 
+    try:
+        secure.issue_credential(
+            principal,
+            run_id=run.run_id,
+            request=CredentialRequest(
+                request_id="req-readonly-write-escalation",
+                binding_id="github-api",
+                scopes=("github:write",),
+            ),
+        )
+    except IdentityAuthorizationError:
+        pass
+    else:
+        raise AssertionError("read-only capability minted a write credential")
+
 
 def test_write_credentials_require_exact_live_approval_and_expire_with_it():
     clock, _, session, _, broker, approvals, secure, principal = make_boundary()
@@ -332,4 +347,56 @@ def test_secured_rebind_rejects_caller_selected_snapshot_reference():
         pass
     else:
         raise AssertionError("caller-selected snapshot reference was accepted")
+
+def test_same_tenant_agent_mismatch_and_mutated_run_cannot_rebind_workspace():
+    _, runtime, session, _, broker, _, secure, principal = make_boundary()
+    another_session = runtime.create_session(
+        agent_id="agent-b",
+        release_id="release-b-v1",
+        tenant_id=session.tenant_id,
+    )
+    other_agent = AuthenticatedPrincipal(
+        issuer=principal.issuer,
+        subject="agent-b-subject",
+        tenant_id=session.tenant_id,
+        agent_id="agent-b",
+    )
+
+    try:
+        secure.start_run(other_agent, session_id=session.session_id)
+    except IdentityAuthorizationError:
+        pass
+    else:
+        raise AssertionError("another Agent in the same tenant accessed this Session")
+
+    another_run = secure.start_run(other_agent, session_id=another_session.session_id)
+    try:
+        secure.get_run(principal, run_id=another_run.run_id)
+    except IdentityAuthorizationError:
+        pass
+    else:
+        raise AssertionError("Agent read another Agent's Run in the same tenant")
+
+    run = secure.start_run(principal, session_id=session.session_id)
+    canonical = runtime.store.get_run(run.run_id)
+    assert canonical.sandbox_ref is not None
+    run.sandbox_ref = "sandbox://kubernetes/forged-workspace"
+    run.sandbox_binding.sandbox_id = "forged-workspace"
+
+    lease = secure.issue_credential(
+        principal,
+        run_id=run.run_id,
+        request=CredentialRequest(
+            request_id="req-canonical-workspace",
+            binding_id="github-api",
+            scopes=("github:read",),
+        ),
+    )
+    identity = broker.validate(
+        lease.access_token,
+        audience="https://api.github.com",
+        required_scopes=("github:read",),
+    )
+    assert identity.workspace_ref == canonical.sandbox_ref
+    assert identity.sandbox_id == canonical.sandbox_binding.sandbox_id
 
