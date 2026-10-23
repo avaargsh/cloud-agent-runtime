@@ -11,6 +11,7 @@ from cloud_agent_runtime.store import InMemoryStore
 
 class FailOnceTerminateProvider(InMemorySandboxProvider):
     def __init__(self) -> None:
+        super().__init__()
         self.failures_remaining = 1
 
     def terminate(self, sandbox):
@@ -27,6 +28,7 @@ class FailingResumeProvider(InMemorySandboxProvider):
 
 class CountingSandboxProvider(InMemorySandboxProvider):
     def __init__(self) -> None:
+        super().__init__()
         self.allocated_ids: list[str] = []
         self.terminated_ids: list[str] = []
 
@@ -287,6 +289,7 @@ class FailingWorkflowDriver:
 
 class TrackingProvider(InMemorySandboxProvider):
     def __init__(self):
+        super().__init__()
         self.allocated = []
         self.terminated = []
 
@@ -1198,6 +1201,7 @@ class RestartableCleanupBackend:
     def __init__(self):
         self.allocated_ids = []
         self.terminated_ids = []
+        self.live_ids = set()
         self.failures_remaining = 1
 
 
@@ -1205,6 +1209,7 @@ class RestartableCleanupProvider(InMemorySandboxProvider):
     """New adapter instances act on the same simulated external provider."""
 
     def __init__(self, backend=None):
+        super().__init__()
         self.backend = backend if backend is not None else RestartableCleanupBackend()
 
     @property
@@ -1218,6 +1223,7 @@ class RestartableCleanupProvider(InMemorySandboxProvider):
     def allocate(self):
         sandbox = super().allocate()
         self.backend.allocated_ids.append(sandbox.sandbox_id)
+        self.backend.live_ids.add(sandbox.sandbox_id)
         return sandbox
 
     def terminate(self, sandbox):
@@ -1225,7 +1231,11 @@ class RestartableCleanupProvider(InMemorySandboxProvider):
         if self.backend.failures_remaining:
             self.backend.failures_remaining -= 1
             raise RuntimeError("simulated cleanup outage across runtime restart")
+        self.backend.live_ids.discard(sandbox.sandbox_id)
         return super().terminate(sandbox)
+
+    def is_gone(self, sandbox_id: str) -> bool:
+        return sandbox_id not in self.backend.live_ids
 
 
 def test_cleanup_intent_recovers_after_sqlite_and_runtime_restart(tmp_path):

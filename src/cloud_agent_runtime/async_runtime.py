@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-from .async_workflow import AsyncWorkflowDriver
+from .async_workflow import AsyncWorkflowDriver, WorkflowStartOutcomeUnknown
 from .contracts import Approval, ApprovalStatus, Budget
 from .models import Run, RunStatus
 from .runtime import AgentRuntime
 from .sandbox import SandboxProvider
 from .store import RuntimeStore
+from .temporal_driver import deterministic_start_operation_id
+
+
+class RunRecoveryConflict(RuntimeError):
+    """Run cannot be resumed safely because provider outcome is unknown."""
 
 
 class AsyncAgentRuntime(AgentRuntime):
@@ -45,13 +50,35 @@ class AsyncAgentRuntime(AgentRuntime):
         except Exception:
             return False
 
+    def _record_recovery(
+        self,
+        run: Run,
+        *,
+        operation_id: str,
+        outcome: str,
+        attempt: int,
+        detail: str,
+    ) -> None:
+        run.recovery_operation_id = operation_id
+        run.recovery_state = outcome
+        run.recovery_attempts = max(run.recovery_attempts, attempt)
+        run.recovery_evidence.append({
+            "operation_id": operation_id,
+            "outcome": outcome,
+            "attempt": str(attempt),
+            "detail": detail,
+        })
+        self.store.save_run(run)
+
     async def start_run(
         self,
         *,
         session_id: str,
         sandbox_ref: str | None = None,
         budget: Budget | None = None,
+        run_id: str | None = None,
     ) -> Run:
+        """Create a durable Run or reconcile a retry with the same caller identity."""
         max_wall_seconds = budget.max_wall_seconds if budget is not None else None
         if max_wall_seconds is not None and (
             isinstance(max_wall_seconds, bool)
@@ -60,60 +87,186 @@ class AsyncAgentRuntime(AgentRuntime):
         ):
             raise ValueError("budget.max_wall_seconds must be a positive integer")
 
-        # super().start_run persists the canonical Run and Sandbox binding
-        # before this async workflow provider creates an external side effect.
-        run = super().start_run(
-            session_id=session_id,
-            sandbox_ref=sandbox_ref,
-            budget=budget,
+        existing: Run | None = None
+        if run_id is not None:
+            if not run_id.strip():
+                raise ValueError("run_id must not be empty")
+            try:
+                existing = self.store.get_run(run_id)
+            except KeyError:
+                existing = None
+
+        if existing is not None:
+            if existing.session_id != session_id:
+                raise ValueError("run_id is already bound to a different Session")
+            if sandbox_ref is not None and existing.sandbox_ref != sandbox_ref:
+                raise ValueError("run_id replay changed the sandbox reference")
+            if budget is not None and existing.budget != budget:
+                raise ValueError("run_id replay changed the Run budget")
+            terminal_statuses = {
+                RunStatus.SUCCEEDED,
+                RunStatus.FAILED,
+                RunStatus.CANCELLED,
+            }
+            if existing.status in terminal_statuses:
+                return existing
+            if existing.recovery_state in {"start_pending", "unknown", "intent_persisted"}:
+                # Ambiguous retries attach/observe only. They never issue a fresh
+                # StartWorkflow request merely because the first ACK was lost.
+                return await self.reconcile_run(existing.run_id)
+            if existing.recovery_state == "attached" and existing.workflow_ref is not None:
+                return existing
+            if existing.recovery_state == "none" and existing.workflow_ref is None:
+                session = self.store.get_session(session_id)
+                if session.status.value != "active":
+                    raise ValueError("runs can only start on an active session")
+                run = existing
+            else:
+                raise RunRecoveryConflict(
+                    f"Run {existing.run_id} has inconsistent recovery metadata; refusing duplicate start"
+                )
+        else:
+            # AgentRuntime commits the canonical Run and its transition evidence
+            # before this async adapter crosses the remote side-effect boundary.
+            run = super().start_run(
+                session_id=session_id,
+                sandbox_ref=sandbox_ref,
+                budget=budget,
+                run_id=run_id,
+            )
+
+        operation_id = deterministic_start_operation_id(run.run_id)
+        run.recovery_operation_id = operation_id
+        run.recovery_state = "start_pending"
+        run.recovery_attempts = 0
+        workflow_id_for = getattr(self.async_workflow_driver, "workflow_id_for", None)
+        workflow_id = (
+            workflow_id_for(run.run_id)
+            if callable(workflow_id_for)
+            else f"agent-run-{run.run_id}"
         )
+        run.recovery_evidence.append({
+            "operation_id": operation_id,
+            "outcome": "intent_persisted",
+            "attempt": "0",
+            "detail": (
+                "canonical Run persisted before provider start; "
+                f"workflow_id={workflow_id}"
+            ),
+        })
+        # This commit is a hard precondition: if it fails, do not call Temporal.
+        self.store.save_run(run)
+
+        start_kwargs = {
+            "runtime_run_id": run.run_id,
+            "session_id": session_id,
+        }
+        if max_wall_seconds is not None:
+            start_kwargs["timeout_seconds"] = float(max_wall_seconds)
 
         try:
-            workflow_ref = (
-                await self.async_workflow_driver.start_run(
-                    runtime_run_id=run.run_id,
-                    session_id=session_id,
-                    **(
-                        {"timeout_seconds": float(max_wall_seconds)}
-                        if max_wall_seconds is not None
-                        else {}
-                    ),
-                )
+            workflow_ref = await self.async_workflow_driver.start_run(**start_kwargs)
+        except WorkflowStartOutcomeUnknown as exc:
+            self._record_recovery(
+                run,
+                operation_id=operation_id,
+                outcome="unknown",
+                attempt=1,
+                detail=f"provider may have accepted start; workflow_id={exc.workflow_id}; {exc}",
             )
-        except Exception:
-            run.status = RunStatus.FAILED
-            self._best_effort_save_failed_run(run)
-            current = self._sandboxes.pop(
-                run.run_id,
-                None,
+            raise
+        except Exception as exc:
+            # RPC errors and connection resets are ambiguous: a server-side
+            # execution may exist even though the caller observed no ACK.
+            # Preserve the Run and sandbox; reconcile by deterministic ID later.
+            self._record_recovery(
+                run,
+                operation_id=operation_id,
+                outcome="unknown",
+                attempt=1,
+                detail=f"start outcome could not be established: {type(exc).__name__}: {exc}",
             )
-            if current is not None:
-                self._best_effort_terminate(current)
             raise
 
         run.workflow_ref = workflow_ref
+        self._record_recovery(
+            run,
+            operation_id=operation_id,
+            outcome="attached",
+            attempt=1,
+            detail=(
+                f"provider acknowledged workflow_id={workflow_ref.workflow_id}; "
+                f"provider={workflow_ref.provider}"
+            ),
+        )
+        return self.store.get_run(run.run_id)
+
+    async def _reconcile_start(self, run: Run) -> Run:
+        """Attach to the deterministic existing workflow without creating one."""
+        operation_id = deterministic_start_operation_id(run.run_id)
+        if run.recovery_operation_id not in (None, operation_id):
+            raise RunRecoveryConflict(
+                "persisted start operation does not match canonical Run"
+            )
+
+        reconcile = getattr(self.async_workflow_driver, "reconcile_start", None)
+        if not callable(reconcile):
+            self._record_recovery(
+                run,
+                operation_id=operation_id,
+                outcome="unknown",
+                attempt=run.recovery_attempts + 1,
+                detail="provider has no start reconciliation API; no replacement workflow was started",
+            )
+            raise RunRecoveryConflict(
+                f"cannot verify provider workflow state for Run {run.run_id}"
+            )
+
+        timeout_seconds = (
+            float(run.budget.max_wall_seconds)
+            if run.budget is not None and run.budget.max_wall_seconds is not None
+            else None
+        )
         try:
-            self.store.save_run(run)
-        except Exception:
-            terminated = (
-                await self._best_effort_terminate_async_workflow(
-                    workflow_ref
-                )
+            workflow_ref = await reconcile(
+                runtime_run_id=run.run_id,
+                session_id=run.session_id,
+                operation_id=operation_id,
+                timeout_seconds=timeout_seconds,
             )
-            run.status = RunStatus.FAILED
-            if terminated:
-                run.workflow_ref = None
-            self._best_effort_save_failed_run(run)
-
-            current = self._sandboxes.pop(
-                run.run_id,
-                None,
+        except Exception as exc:
+            self._record_recovery(
+                run,
+                operation_id=operation_id,
+                outcome="unknown",
+                attempt=run.recovery_attempts + 1,
+                detail=f"provider reconciliation failed closed: {type(exc).__name__}: {exc}",
             )
-            if current is not None:
-                self._best_effort_terminate(current)
-            raise
+            raise RunRecoveryConflict(
+                f"provider reconciliation failed for Run {run.run_id}; no duplicate was started"
+            ) from exc
 
-        return run
+        if workflow_ref is None:
+            self._record_recovery(
+                run,
+                operation_id=operation_id,
+                outcome="unknown",
+                attempt=run.recovery_attempts + 1,
+                detail="provider could not confirm the deterministic Workflow ID; no duplicate was started",
+            )
+            raise RunRecoveryConflict(
+                f"provider cannot prove workflow existence or absence for Run {run.run_id}"
+            )
+
+        run.workflow_ref = workflow_ref
+        self._record_recovery(
+            run,
+            operation_id=operation_id,
+            outcome="attached",
+            attempt=run.recovery_attempts + 1,
+            detail=f"reconciled existing workflow_id={workflow_ref.workflow_id}; provider={workflow_ref.provider}",
+        )
+        return self.store.get_run(run.run_id)
 
     async def reconcile_run(self, run_id: str) -> Run:
         """Reconcile canonical Run state with its durable Temporal workflow state.
@@ -123,6 +276,13 @@ class AsyncAgentRuntime(AgentRuntime):
         a stale workflow observation to resurrect a terminal Run.
         """
         run = self.store.get_run(run_id)
+        start_operation_id = deterministic_start_operation_id(run.run_id)
+        if run.workflow_ref is None or (
+            run.recovery_operation_id == start_operation_id
+            and run.recovery_state in {"start_pending", "unknown", "intent_persisted"}
+        ):
+            run = await self._reconcile_start(run)
+
         if run.workflow_ref is None:
             return run
 

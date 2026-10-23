@@ -7,6 +7,22 @@ from typing import Any
 from .workflow import WorkflowRef
 
 
+def deterministic_start_operation_id(runtime_run_id: str) -> str:
+    """Stable provider-start operation identity, independent of attempts."""
+    if not runtime_run_id or not runtime_run_id.strip():
+        raise ValueError("runtime_run_id must be non-empty")
+    return f"agent-run-start:{runtime_run_id}"
+
+
+def deterministic_cleanup_operation_id(run_id: str, sandbox_ref: str) -> str:
+    """Stable cleanup identity bound to its owner Run and sandbox reference."""
+    if not run_id or not run_id.strip():
+        raise ValueError("run_id must be non-empty")
+    if not sandbox_ref or not sandbox_ref.strip():
+        raise ValueError("sandbox_ref must be non-empty")
+    return f"sandbox-cleanup:{run_id}:{sandbox_ref}"
+
+
 _TERMINAL_WORKFLOW_STATUSES = {
     "COMPLETED",
     "FAILED",
@@ -124,6 +140,7 @@ class TemporalWorkflowDriver:
                     {
                         "runtime_run_id": runtime_run_id,
                         "session_id": session_id,
+                        "start_operation_id": deterministic_start_operation_id(runtime_run_id),
                         **(
                             {
                                 "timeout_seconds": timeout_seconds,
@@ -175,6 +192,52 @@ class TemporalWorkflowDriver:
                 "first_execution_run_id",
                 None,
             ),
+        )
+
+    async def reconcile_start(
+        self,
+        *,
+        runtime_run_id: str,
+        session_id: str,
+        operation_id: str,
+        timeout_seconds: float | None = None,
+    ) -> WorkflowRef | None:
+        expected_operation_id = deterministic_start_operation_id(runtime_run_id)
+        if operation_id != expected_operation_id:
+            raise ValueError("start operation identity does not match canonical Run")
+        workflow_id = self.workflow_id_for(runtime_run_id)
+        handle = self.client.get_workflow_handle(workflow_id)
+        describe = getattr(handle, "describe", None)
+        if describe is None:
+            raise TemporalWorkflowConflict(
+                f"cannot reconcile workflow start without status lookup: {workflow_id}"
+            )
+        try:
+            description = await describe()
+        except Exception as exc:
+            raise TemporalWorkflowConflict(
+                f"workflow start outcome remains unknown for {workflow_id}"
+            ) from exc
+        status = getattr(description, "status", None)
+        if isinstance(description, dict):
+            status = description.get("status")
+        if not status:
+            raise TemporalWorkflowConflict(
+                f"workflow start outcome remains unknown; status unavailable: {workflow_id}"
+            )
+        if _workflow_is_terminal(status):
+            # The canonical Run may still have an ambiguous start outcome,
+            # but a terminal execution must never be projected as an active
+            # attachment. A separate terminal-result reconciliation path may
+            # update the canonical terminal state; start recovery fails closed.
+            raise TemporalWorkflowConflict(
+                "existing Temporal workflow is terminal: "
+                f"{workflow_id} status={_workflow_status_name(status)}"
+            )
+        return WorkflowRef(
+            provider=self.name,
+            workflow_id=workflow_id,
+            run_id=getattr(handle, "first_execution_run_id", None),
         )
 
     async def signal(

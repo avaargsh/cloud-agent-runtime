@@ -16,6 +16,7 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = [
+  "hpack>=4.0,<5",
   "pytest>=8.0",
   "temporalio>=1.33,<2",
 ]

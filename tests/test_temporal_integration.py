@@ -1,4 +1,9 @@
 import asyncio
+import os
+import signal
+import subprocess
+import sys
+from pathlib import Path
 from uuid import uuid4
 
 from temporalio.testing import WorkflowEnvironment
@@ -376,5 +381,247 @@ def test_temporal_deadline_survives_worker_restart_and_replay() -> None:
                 assert result["transition_events"][-1]["event_id"] == (
                     "timeout-durable-before-restart"
                 )
+
+    asyncio.run(scenario())
+
+
+
+def test_temporal_worker_process_sigkill_restarts_same_workflow_identity(tmp_path) -> None:
+    """Kill the OS Worker process, append history while it is absent, and replay."""
+    if os.name != "posix":
+        import pytest
+        pytest.skip("the process-level SIGKILL experiment requires POSIX")
+
+    def log_tail(path: Path) -> str:
+        try:
+            return path.read_text(encoding="utf-8", errors="replace")[-5000:]
+        except OSError:
+            return "<worker log not available>"
+
+    async def wait_for_state(
+        handle,
+        predicate,
+        *,
+        timeout_seconds=30.0,
+        worker=None,
+        log_path: Path | None = None,
+    ):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        last_error = None
+        last_state = None
+        while loop.time() < deadline:
+            if worker is not None and worker.poll() is not None:
+                raise AssertionError(
+                    f"worker process exited unexpectedly with code {worker.returncode}; "
+                    f"log={log_tail(log_path) if log_path else '<no log>'}"
+                )
+            try:
+                state = await asyncio.wait_for(
+                    handle.query(AgentRunWorkflow.run_state),
+                    timeout=2.0,
+                )
+                last_state = state
+                if predicate(state):
+                    return state
+            except Exception as exc:
+                last_error = exc
+            await asyncio.sleep(0.1)
+        raise AssertionError(
+            f"workflow did not reach expected state before timeout; "
+            f"last state={last_state!r}; last query error={last_error!r}; "
+            f"worker poll={worker.poll() if worker is not None else None}; "
+            f"log={log_tail(log_path) if log_path else '<no log>'}"
+        )
+
+    def spawn_worker(
+        target: str,
+        task_queue: str,
+        repository_root: Path,
+        log_path: Path,
+        log_handles: list,
+        *,
+        max_cached_workflows: int | None = None,
+    ):
+        worker_env = os.environ.copy()
+        source_root = str(repository_root / "src")
+        existing_pythonpath = worker_env.get("PYTHONPATH")
+        worker_env["PYTHONPATH"] = (
+            source_root
+            if not existing_pythonpath
+            else source_root + os.pathsep + existing_pythonpath
+        )
+        worker_env["PYTHONUNBUFFERED"] = "1"
+        log_handle = log_path.open("wb")
+        log_handles.append(log_handle)
+        worker_command = [
+            sys.executable,
+            "-m",
+            "cloud_agent_runtime.temporal_worker",
+            "--target",
+            target,
+            "--namespace",
+            "default",
+            "--task-queue",
+            task_queue,
+        ]
+        if max_cached_workflows is not None:
+            worker_command.extend(
+                ["--max-cached-workflows", str(max_cached_workflows)]
+            )
+        return subprocess.Popen(
+            worker_command,
+            cwd=repository_root,
+            env=worker_env,
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+        )
+
+    async def scenario() -> None:
+        async with await WorkflowEnvironment.start_time_skipping() as env:
+            task_queue = f"test-agent-sigkill-{uuid4()}"
+            workflow_id = f"agent-run-sigkill-{uuid4()}"
+            runtime_run_id = f"canonical-run-{uuid4()}"
+            session_id = f"canonical-session-{uuid4()}"
+            payload = {
+                "runtime_run_id": runtime_run_id,
+                "session_id": session_id,
+            }
+            # The Temporal SDK's Client.config is a method; its service
+            # client exposes the concrete target needed by the subprocess.
+            target = env.client.service_client.config.target_host
+            repository_root = Path(__file__).resolve().parents[1]
+            workers: list[subprocess.Popen] = []
+            worker_log_handles = []
+            worker_a_log = tmp_path / "temporal-worker-a.log"
+            worker_b_log = tmp_path / "temporal-worker-b.log"
+            handle = None
+            first_execution_run_id = None
+            try:
+                # Disable sticky workflow caching on Worker A as well as
+                # Worker B. Otherwise the Temporal test server may keep
+                # routing recovery to the dead process's sticky queue.
+                worker_a = spawn_worker(
+                    target,
+                    task_queue,
+                    repository_root,
+                    worker_a_log,
+                    worker_log_handles,
+                    max_cached_workflows=0,
+                )
+                workers.append(worker_a)
+                handle = await env.client.start_workflow(
+                    AgentRunWorkflow.run,
+                    payload,
+                    id=workflow_id,
+                    task_queue=task_queue,
+                )
+                # Do not confuse a pre-initialization signal with a
+                # Worker-restart recovery test. First prove the workflow's
+                # start transition is durable, then move it to Waiting.
+                started = await wait_for_state(
+                    handle,
+                    lambda state: state.get("phase") == "running",
+                    worker=worker_a,
+                    log_path=worker_a_log,
+                )
+                assert started["runtime_run_id"] == runtime_run_id
+                assert started["session_id"] == session_id
+                await handle.signal(
+                    AgentRunWorkflow.wait_for_input,
+                    {"event_id": "durable-wait-before-sigkill"},
+                )
+                waiting = await wait_for_state(
+                    handle,
+                    lambda state: state.get("phase") == "waiting",
+                    worker=worker_a,
+                    log_path=worker_a_log,
+                )
+                assert worker_a.poll() is None
+                assert waiting["runtime_run_id"] == runtime_run_id
+                assert waiting["session_id"] == session_id
+                assert handle.id == workflow_id
+                first_execution_run_id = handle.first_execution_run_id
+
+                # This is an OS-level uncatchable kill, not Worker context exit.
+                worker_a.send_signal(signal.SIGKILL)
+                return_code = await asyncio.to_thread(worker_a.wait, timeout=10)
+                assert return_code == -signal.SIGKILL
+
+                # Temporal must accept and persist events while no Worker polls.
+                for _ in range(2):
+                    await handle.signal(
+                        AgentRunWorkflow.approval_resolved,
+                        {
+                            "approval_id": "approval-during-outage",
+                            "approved": True,
+                            "evidence_refs": ["evidence://sigkill/approval"],
+                        },
+                    )
+
+                worker_b = spawn_worker(
+                    target,
+                    task_queue,
+                    repository_root,
+                    worker_b_log,
+                    worker_log_handles,
+                    max_cached_workflows=0,
+                )
+                workers.append(worker_b)
+                replayed = await wait_for_state(
+                    handle,
+                    lambda state: (
+                        state.get("phase") == "running"
+                        and len(state.get("approval_events", [])) == 1
+                    ),
+                    worker=worker_b,
+                    log_path=worker_b_log,
+                )
+                assert worker_b.poll() is None
+                assert handle.id == workflow_id
+                assert handle.first_execution_run_id == first_execution_run_id
+                assert replayed["runtime_run_id"] == runtime_run_id
+                assert replayed["session_id"] == session_id
+                assert len(replayed["approval_events"]) == 1
+                assert replayed["evidence_refs"] == ["evidence://sigkill/approval"]
+                assert [
+                    (event["from_phase"], event["to_phase"])
+                    for event in replayed["transition_events"]
+                ] == [
+                    ("pending", "running"),
+                    ("running", "waiting"),
+                    ("waiting", "running"),
+                ]
+
+                await handle.signal(
+                    AgentRunWorkflow.complete_run,
+                    {
+                        "event_id": "complete-after-sigkill",
+                        "result": {"worker_restarted": True},
+                        "evidence_refs": ["evidence://sigkill/complete"],
+                    },
+                )
+                result = await asyncio.wait_for(handle.result(), timeout=30.0)
+                assert result["phase"] == "succeeded"
+                assert result["runtime_run_id"] == runtime_run_id
+                assert result["session_id"] == session_id
+                assert result["result"] == {"worker_restarted": True}
+                assert [
+                    (event["from_phase"], event["to_phase"])
+                    for event in result["transition_events"]
+                ] == [
+                    ("pending", "running"),
+                    ("running", "waiting"),
+                    ("waiting", "running"),
+                    ("running", "succeeded"),
+                ]
+            finally:
+                for worker in workers:
+                    if worker.poll() is None:
+                        worker.kill()
+                        await asyncio.to_thread(worker.wait, timeout=10)
+                for log_handle in worker_log_handles:
+                    log_handle.close()
 
     asyncio.run(scenario())

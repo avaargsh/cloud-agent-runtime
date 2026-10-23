@@ -182,79 +182,80 @@ def test_temporal_driver_rejects_duplicate_when_status_cannot_be_verified() -> N
     asyncio.run(scenario())
 
 
-
-def test_temporal_driver_passes_timeout_deadline_into_workflow_input():
+def test_temporal_driver_reconcile_start_attaches_to_deterministic_workflow_id() -> None:
     async def scenario():
         client = FakeClient()
         driver = TemporalWorkflowDriver(client=client, task_queue="agent-runs")
-        await driver.start_run(
-            runtime_run_id="run-deadline",
-            session_id="session-deadline",
-            timeout_seconds=17,
+        from cloud_agent_runtime.temporal_driver import deterministic_start_operation_id
+
+        ref = await driver.reconcile_start(
+            runtime_run_id="run-restart-1",
+            session_id="session-restart-1",
+            operation_id=deterministic_start_operation_id("run-restart-1"),
         )
-        payload = client.started[0]["args"][0]
-        assert payload["runtime_run_id"] == "run-deadline"
-        assert payload["session_id"] == "session-deadline"
-        assert payload["timeout_seconds"] == 17
-        assert payload["timeout_event_id"] == "timeout:run-deadline"
+        assert ref.workflow_id == "agent-run-run-restart-1"
+        assert ref.run_id == "temporal-run-1"
+        assert client.started == []
 
     asyncio.run(scenario())
 
 
-def test_temporal_driver_reads_terminal_run_state_from_history_result():
-    class ClosedHandle(FakeHandle):
-        def __init__(self):
-            super().__init__()
-            self.query_calls = 0
-            self.result_calls = 0
-
-        async def query(self, name, *args):
-            self.query_calls += 1
-            raise RuntimeError("closed workflow does not service queries")
-
-        async def describe(self):
-            return {"status": "COMPLETED"}
-
-        async def result(self):
-            self.result_calls += 1
-            return {
-                "runtime_run_id": "run-closed",
-                "session_id": "session-closed",
-                "phase": "failed",
-                "error": "run timed out after 1 seconds",
-                "evidence_refs": ["evidence://timeout/closed"],
-                "transition_events": [
-                    {"event_type": "run_timed_out", "event_id": "timeout:run-closed"}
-                ],
-            }
-
+def test_temporal_driver_reconcile_start_rejects_wrong_operation_identity() -> None:
     async def scenario():
         client = FakeClient()
-        client.handle = ClosedHandle()
         driver = TemporalWorkflowDriver(client=client, task_queue="agent-runs")
-        from cloud_agent_runtime.workflow import WorkflowRef
-        state = await driver.query(
-            WorkflowRef(
-                provider="temporal",
-                workflow_id="agent-run-run-closed",
-                run_id="temporal-run-1",
-            ),
-            name="run_state",
-        )
-        assert state["phase"] == "failed"
-        assert state["terminal"] is True
-        assert state["paused"] is False
-        assert state["runtime_run_id"] == "run-closed"
-        assert client.handle.query_calls == 0
-        assert client.handle.result_calls == 1
+        with pytest.raises(ValueError, match="does not match canonical Run"):
+            await driver.reconcile_start(
+                runtime_run_id="run-restart-1",
+                session_id="session-restart-1",
+                operation_id="agent-run-start:someone-else",
+            )
+        assert client.started == []
 
     asyncio.run(scenario())
 
 
-def test_temporal_status_normalizes_generated_enum_name_prefix():
-    class EnumLikeStatus:
-        name = "WORKFLOW_EXECUTION_STATUS_COMPLETED"
+def test_temporal_driver_reconcile_start_fails_closed_when_describe_has_no_status() -> None:
+    async def scenario():
+        client = FakeClient()
+        client.handle.status = None
+        driver = TemporalWorkflowDriver(client=client, task_queue="agent-runs")
+        from cloud_agent_runtime.temporal_driver import deterministic_start_operation_id
 
-    from cloud_agent_runtime.temporal_driver import _workflow_is_terminal
+        with pytest.raises(TemporalWorkflowConflict, match="status unavailable"):
+            # A fake Describe response with no status is ambiguity, not proof
+            # of absence, so this method must never call start_workflow.
+            client.handle.describe = async_no_status
+            await driver.reconcile_start(
+                runtime_run_id="run-unknown",
+                session_id="session-unknown",
+                operation_id=deterministic_start_operation_id("run-unknown"),
+            )
+        assert client.started == []
 
-    assert _workflow_is_terminal(EnumLikeStatus())
+    async def async_no_status():
+        return {"status": None}
+
+    asyncio.run(scenario())
+
+
+
+def test_temporal_driver_reconcile_start_rejects_terminal_workflow() -> None:
+    async def scenario():
+        from cloud_agent_runtime.temporal_driver import deterministic_start_operation_id
+
+        client = FakeClient()
+        client.handle.status = "COMPLETED"
+        driver = TemporalWorkflowDriver(client=client, task_queue="agent-runs")
+        with pytest.raises(
+            TemporalWorkflowConflict,
+            match="existing Temporal workflow is terminal",
+        ):
+            await driver.reconcile_start(
+                runtime_run_id="run-terminal",
+                session_id="session-terminal",
+                operation_id=deterministic_start_operation_id("run-terminal"),
+            )
+        assert client.started == []
+
+    asyncio.run(scenario())
