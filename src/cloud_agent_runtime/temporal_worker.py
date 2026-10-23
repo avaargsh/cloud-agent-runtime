@@ -15,16 +15,28 @@ async def run_worker(
     target: str,
     namespace: str,
     task_queue: str,
+    max_cached_workflows: int | None = None,
 ) -> None:
     client = await Client.connect(
         target,
         namespace=namespace,
     )
 
+    worker_options = {}
+    if max_cached_workflows is not None:
+        if (
+            isinstance(max_cached_workflows, bool)
+            or not isinstance(max_cached_workflows, int)
+            or max_cached_workflows < 0
+        ):
+            raise ValueError("max_cached_workflows must be a non-negative integer")
+        worker_options["max_cached_workflows"] = max_cached_workflows
+
     worker = Worker(
         client,
         task_queue=task_queue,
         workflows=[AgentRunWorkflow],
+        **worker_options,
     )
     await worker.run()
 
@@ -54,6 +66,12 @@ def main() -> None:
             "agent-runs",
         ),
     )
+    parser.add_argument(
+        "--max-cached-workflows",
+        type=int,
+        default=None,
+        help="Override Temporal workflow cache capacity; 0 forces history replay.",
+    )
     args = parser.parse_args()
 
     asyncio.run(
@@ -61,6 +79,7 @@ def main() -> None:
             target=args.target,
             namespace=args.namespace,
             task_queue=args.task_queue,
+            max_cached_workflows=args.max_cached_workflows,
         )
     )
 
