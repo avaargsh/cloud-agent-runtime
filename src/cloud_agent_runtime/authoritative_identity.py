@@ -175,9 +175,9 @@ class HttpsJsonAuthorityTransport:
                 raw = response.read(self._MAX_RESPONSE_BYTES + 1)
                 status = response.status
         except HTTPError as exc:
-            if exc.code == 404:
+            if exc.code == 404 and method == "GET" and path.startswith("/v1/authorization/approvals/"):
                 raise AuthorityNotFoundError(404) from None
-            if exc.code == 409:
+            if exc.code == 409 and method == "POST" and path == "/v1/workload-credentials:issue":
                 raise CredentialReplayError("authoritative request ID was already consumed") from None
             if exc.code in (401, 403):
                 raise IdentityAuthorizationError("authoritative identity request was denied") from None
@@ -338,6 +338,8 @@ class AuthoritativeCredentialBroker(CredentialBroker):
             scope.rsplit(":", 1)[-1].lower() in {"write", "delete", "admin", "mutate"}
             for scope in requested
         )
+        if request.approval_id is not None and not needs_approval:
+            raise IdentityAuthorizationError("approval IDs are accepted only for approval-scoped credentials")
         if needs_approval:
             if approval is None or (
                 approval.tenant_id != identity.tenant_id
@@ -475,11 +477,21 @@ class AuthoritativeCredentialBroker(CredentialBroker):
         )
         return _revoked_count(response)
 
-    def revoke_approval(self, approval_id: str) -> int:
+    def revoke_approval(
+        self,
+        approval_id: str,
+        *,
+        event_id: str | None = None,
+    ) -> int:
+        body: dict[str, Any] = {"approval_id": approval_id}
+        if event_id is not None:
+            if not event_id.strip():
+                raise ValueError("event_id must be non-empty when supplied")
+            body["event_id"] = event_id
         response = self.transport.request(
             "POST",
             "/v1/workload-credentials:revoke-approval",
-            {"approval_id": approval_id},
+            body,
         )
         return _revoked_count(response)
 
@@ -513,7 +525,10 @@ class AuthoritativeApprovalResolver(ApprovalResolver):
             )
         except AuthorityNotFoundError:
             return None
-        return _decode_grant(payload, now=self._clock())
+        grant = _decode_grant(payload, now=self._clock())
+        if grant is not None and grant.approval_id != approval_id:
+            raise AuthorityProtocolError("authoritative approval ID does not match the requested ID")
+        return grant
 
     def revoke(self, approval_id: str, *, event_id: str) -> int:
         """Apply a trusted, uniquely identified revocation event to the authority."""
@@ -537,12 +552,19 @@ class ApprovalRevocationEvent:
     source: str
 
 
+class ApprovalRevocationEventVerifier(Protocol):
+    """Authenticates a signed event or trusted outbox/mTLS delivery envelope."""
+
+    def verify(self, event: ApprovalRevocationEvent) -> bool:
+        ...
+
+
 class ApprovalRevocationFanout:
     """Fan out trusted approval revocation to authority and broker fail-closed.
 
-    The event consumer must authenticate its source before calling handle().
+    A trusted verifier is mandatory; source text alone is not authentication.
     The authority is revoked first. If broker fan-out fails, the exception is
-    surfaced for retry; the authority API must already deny new issuance and
+    surfaced for retry; the authority API must already deny issuance and
     introspection for that approval while fan-out converges.
     """
 
@@ -551,9 +573,11 @@ class ApprovalRevocationFanout:
         *,
         approvals: AuthoritativeApprovalResolver,
         broker: CredentialBroker,
+        event_verifier: ApprovalRevocationEventVerifier,
     ) -> None:
         self._approvals = approvals
         self._broker = broker
+        self._event_verifier = event_verifier
 
     def handle(self, event: ApprovalRevocationEvent) -> int:
         if (
@@ -565,7 +589,16 @@ class ApprovalRevocationFanout:
             or not event.source.strip()
         ):
             raise ValueError("complete trusted approval revocation event is required")
+        try:
+            verified = self._event_verifier.verify(event)
+        except Exception:
+            raise IdentityAuthorizationError("approval revocation event authentication failed") from None
+        if verified is not True:
+            raise IdentityAuthorizationError("approval revocation event authentication failed")
         self._approvals.revoke(event.approval_id, event_id=event.event_id)
         # Do not swallow this failure. The caller's durable inbox must retry;
         # introspection at the authority must deny revoked-approval leases.
-        return self._broker.revoke_approval(event.approval_id)
+        return self._broker.revoke_approval(
+            event.approval_id,
+            event_id=event.event_id,
+        )
