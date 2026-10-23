@@ -71,3 +71,7 @@ class Run:
     budget: Budget | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
     transition_events: list[dict[str, object]] = field(default_factory=list)
+    recovery_operation_id: str | None = None
+    recovery_state: str = "none"
+    recovery_attempts: int = 0
+    recovery_evidence: list[dict[str, str]] = field(default_factory=list)
