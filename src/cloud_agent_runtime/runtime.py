@@ -664,6 +664,10 @@ class AgentRuntime:
         binding = self._ensure_binding(run)
         if binding is None or not binding.sandbox_ref:
             return False
+        if (
+            run.metadata.get("cancel_cleanup_completed_ref") == binding.sandbox_ref
+        ):
+            return False
         if binding.sandbox_ref in binding.pending_cleanup_refs:
             return False
         binding.pending_cleanup_refs.append(binding.sandbox_ref)
@@ -677,6 +681,17 @@ class AgentRuntime:
         if run.status == RunStatus.CANCELLED and (
             binding is None or not binding.pending_cleanup_refs
         ):
+            if (
+                binding is not None
+                and binding.sandbox_ref
+                and run.metadata.get("cancel_cleanup_completed_ref")
+                != binding.sandbox_ref
+            ):
+                run.metadata = {
+                    **dict(run.metadata),
+                    "cancel_cleanup_completed_ref": binding.sandbox_ref,
+                }
+                self.store.save_run(run)
             self._sandboxes.pop(run_id, None)
         return run
 
