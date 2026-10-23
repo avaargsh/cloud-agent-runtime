@@ -180,3 +180,36 @@ def test_temporal_driver_rejects_duplicate_when_status_cannot_be_verified() -> N
             )
 
     asyncio.run(scenario())
+
+
+def test_temporal_driver_reconcile_start_attaches_to_deterministic_workflow_id() -> None:
+    async def scenario():
+        client = FakeClient()
+        driver = TemporalWorkflowDriver(client=client, task_queue="agent-runs")
+        from cloud_agent_runtime.temporal_driver import deterministic_start_operation_id
+
+        ref = await driver.reconcile_start(
+            runtime_run_id="run-restart-1",
+            session_id="session-restart-1",
+            operation_id=deterministic_start_operation_id("run-restart-1"),
+        )
+        assert ref.workflow_id == "agent-run-run-restart-1"
+        assert ref.run_id == "temporal-run-1"
+        assert client.started == []
+
+    asyncio.run(scenario())
+
+
+def test_temporal_driver_reconcile_start_rejects_wrong_operation_identity() -> None:
+    async def scenario():
+        client = FakeClient()
+        driver = TemporalWorkflowDriver(client=client, task_queue="agent-runs")
+        with pytest.raises(ValueError, match="does not match canonical Run"):
+            await driver.reconcile_start(
+                runtime_run_id="run-restart-1",
+                session_id="session-restart-1",
+                operation_id="agent-run-start:someone-else",
+            )
+        assert client.started == []
+
+    asyncio.run(scenario())
