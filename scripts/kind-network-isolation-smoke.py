@@ -124,7 +124,7 @@ try:
     sandbox_a = runtime._sandboxes[run.run_id]
     sandbox_a_id = sandbox_a.sandbox_id
     sandbox_a_ref = run.sandbox_ref
-    sandbox_a_namespace = provider._namespace_for(sandbox_a_id)
+    sandbox_a_namespace = provider.namespace
     k(
         "-n", sandbox_a_namespace, "wait",
         "--for=condition=Ready", f"pod/{sandbox_a_id}", "--timeout=120s",
@@ -223,7 +223,7 @@ try:
     )
     sandbox_b = runtime._sandboxes[run.run_id]
     sandbox_b_id = sandbox_b.sandbox_id
-    sandbox_b_namespace = provider._namespace_for(sandbox_b_id)
+    sandbox_b_namespace = provider.namespace
     if not failure["injected"]:
         raise RuntimeError("expected cleanup failure injection was not exercised")
     if rebound.run_id != run.run_id or rebound.session_id != session.session_id:
