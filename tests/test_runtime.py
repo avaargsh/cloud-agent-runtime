@@ -391,6 +391,7 @@ def test_cleanup_lost_ack_is_retryable_with_same_operation_and_evidence() -> Non
     run.sandbox_binding.pending_cleanup_refs = [old_ref]
     rt.store.save_run(run)
 
+    rt._cleanup_ack_unknown_once = True
     first = rt.cleanup_retired_sandboxes(run.run_id)
     first_state = rt.store.get_run(run.run_id)
     first_events = [
