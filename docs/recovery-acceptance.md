@@ -41,3 +41,12 @@ The process-level scenario must run a separate caller process against a live Tem
 6. Persist the report with Run ID, operation ID, Workflow ID, process exit signal, Temporal execution IDs/count, restart PID, exact commit SHA and CI artifact URL.
 
 Do not mark R01 passed when only a fake driver or in-process exception is used.
+
+
+## Caller process test harness
+
+`cloud-agent-runtime-recovery-probe` is a small separate-process helper. It writes an intent record before requesting Temporal and supports a later `reconcile` process that can only attach by the stable Workflow ID. It is a harness component, not evidence by itself.
+
+A live ACK-loss experiment must be run against a disposable Temporal service via a TCP/gRPC fault proxy. The fault proxy must confirm it forwarded the start request and then drop/reset the response before the caller receives it. Run the probe as a subprocess, record its PID, kill it with SIGKILL while the response is blocked, then invoke `reconcile` from a new process against the same state file. The provider's workflow execution list must show exactly one Workflow ID and the returned workflow ref must match it.
+
+Until that exact harness has been executed and the report plus temporal history exported, R01 and R11 remain `NOT RUN`. No CI result from the ordinary pytest matrix may be substituted for that evidence.
