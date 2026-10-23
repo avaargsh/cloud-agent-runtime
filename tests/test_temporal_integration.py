@@ -440,6 +440,8 @@ def test_temporal_worker_process_sigkill_restarts_same_workflow_identity(tmp_pat
         repository_root: Path,
         log_path: Path,
         log_handles: list,
+        *,
+        max_cached_workflows: int | None = None,
     ):
         worker_env = os.environ.copy()
         source_root = str(repository_root / "src")
@@ -452,18 +454,23 @@ def test_temporal_worker_process_sigkill_restarts_same_workflow_identity(tmp_pat
         worker_env["PYTHONUNBUFFERED"] = "1"
         log_handle = log_path.open("wb")
         log_handles.append(log_handle)
+        worker_command = [
+            sys.executable,
+            "-m",
+            "cloud_agent_runtime.temporal_worker",
+            "--target",
+            target,
+            "--namespace",
+            "default",
+            "--task-queue",
+            task_queue,
+        ]
+        if max_cached_workflows is not None:
+            worker_command.extend(
+                ["--max-cached-workflows", str(max_cached_workflows)]
+            )
         return subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "cloud_agent_runtime.temporal_worker",
-                "--target",
-                target,
-                "--namespace",
-                "default",
-                "--task-queue",
-                task_queue,
-            ],
+            worker_command,
             cwd=repository_root,
             env=worker_env,
             stdin=subprocess.DEVNULL,
@@ -546,7 +553,12 @@ def test_temporal_worker_process_sigkill_restarts_same_workflow_identity(tmp_pat
                     )
 
                 worker_b = spawn_worker(
-                    target, task_queue, repository_root, worker_b_log, worker_log_handles
+                    target,
+                    task_queue,
+                    repository_root,
+                    worker_b_log,
+                    worker_log_handles,
+                    max_cached_workflows=0,
                 )
                 workers.append(worker_b)
                 replayed = await wait_for_state(
