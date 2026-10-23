@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any
 
 from .workflow import WorkflowRef
@@ -98,7 +99,12 @@ class TemporalWorkflowDriver:
         session_id: str,
         timeout_seconds: float | None = None,
     ) -> WorkflowRef:
-        if timeout_seconds is not None and timeout_seconds <= 0:
+        if timeout_seconds is not None and (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(float(timeout_seconds))
+            or timeout_seconds <= 0
+        ):
             raise ValueError("timeout_seconds must be a finite positive number")
         workflow_id = self.workflow_id_for(
             runtime_run_id
@@ -226,6 +232,32 @@ class TemporalWorkflowDriver:
                 workflow.workflow_id,
             )
 
-        if args is None:
-            return await handle.query(name)
-        return await handle.query(name, args)
+        try:
+            if args is None:
+                return await handle.query(name)
+            return await handle.query(name, args)
+        except Exception:
+            if name != "run_state":
+                raise
+
+            # Closed Temporal executions no longer service worker-backed
+            # queries. Their result is durable in history; expose it through
+            # the same state shape so reconciliation can persist terminal
+            # outcomes such as timeout into the canonical RuntimeStore.
+            description = await handle.describe()
+            status = getattr(description, "status", None)
+            if isinstance(description, dict):
+                status = description.get("status")
+            if not _workflow_is_terminal(status):
+                raise
+
+            result = await handle.result()
+            if not isinstance(result, dict) or "phase" not in result:
+                raise
+            phase = str(result["phase"])
+            return {
+                **result,
+                "paused": phase == "paused",
+                "terminal": True,
+                "approval_events": list(result.get("approval_events", [])),
+            }
