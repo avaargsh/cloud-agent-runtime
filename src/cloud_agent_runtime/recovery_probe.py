@@ -4,10 +4,108 @@ import argparse
 import asyncio
 import json
 import os
+import signal
 from pathlib import Path
 from typing import Any
 
 from .temporal_driver import TemporalWorkflowDriver, deterministic_start_operation_id
+
+from .async_runtime import AsyncAgentRuntime
+from .sandbox import InMemorySandboxProvider
+from .store import SQLiteStore
+
+
+class CrashAfterAcceptedStartDriver:
+    """Kill the caller after Temporal accepts start but before Run binds its WorkflowRef."""
+
+    name = "temporal-crash-after-accepted-start"
+
+    def __init__(self, driver: TemporalWorkflowDriver) -> None:
+        self.driver = driver
+
+    async def start_run(
+        self,
+        *,
+        runtime_run_id: str,
+        session_id: str,
+        timeout_seconds: float | None = None,
+    ):
+        ref = await self.driver.start_run(
+            runtime_run_id=runtime_run_id,
+            session_id=session_id,
+            timeout_seconds=timeout_seconds,
+        )
+        # The RPC was accepted, but AsyncAgentRuntime has not persisted the
+        # returned WorkflowRef. This actual process death leaves the durable
+        # Run at start_pending so a different process must reconcile it.
+        os.kill(os.getpid(), signal.SIGKILL)
+        raise AssertionError(f"SIGKILL should have ended process after {ref.workflow_id}")
+
+    async def reconcile_start(self, **kwargs):
+        return await self.driver.reconcile_start(**kwargs)
+
+    async def signal(self, workflow, *, name: str, payload: dict) -> None:
+        await self.driver.signal(workflow, name=name, payload=payload)
+
+    async def terminate_run(self, workflow, *, reason: str, operation_id: str | None = None) -> None:
+        await self.driver.terminate_run(workflow, reason=reason)
+
+
+async def _crash_after_accepted_start(args) -> None:
+    store = SQLiteStore(args.sqlite_path)
+    driver = await TemporalWorkflowDriver.connect(
+        args.temporal_address,
+        task_queue=args.task_queue,
+        namespace=args.namespace,
+    )
+    runtime = AsyncAgentRuntime(
+        store=store,
+        sandbox_provider=InMemorySandboxProvider(),
+        workflow_driver=CrashAfterAcceptedStartDriver(driver),
+    )
+    session = runtime.create_session(
+        agent_id="p0-recovery-probe",
+        release_id="p0-recovery-probe-v1",
+        tenant_id="p0-recovery-test",
+    )
+    # The process is expected to be SIGKILLed in the driver's start_run,
+    # after the provider creates the workflow but before its ref can be saved.
+    await runtime.start_run(session_id=session.session_id)
+    raise AssertionError("expected crash-after-accepted-start driver to SIGKILL")
+
+
+async def _reconcile_sqlite(args) -> None:
+    store = SQLiteStore(args.sqlite_path)
+    driver = await TemporalWorkflowDriver.connect(
+        args.temporal_address,
+        task_queue=args.task_queue,
+        namespace=args.namespace,
+    )
+    runtime = AsyncAgentRuntime(
+        store=store,
+        sandbox_provider=InMemorySandboxProvider(),
+        workflow_driver=driver,
+    )
+    run = await runtime.reconcile_run(args.run_id)
+    print(json.dumps({
+        "run_id": run.run_id,
+        "status": run.status.value,
+        "recovery_state": run.recovery_state,
+        "recovery_operation_id": run.recovery_operation_id,
+        "workflow_ref": {
+            "provider": run.workflow_ref.provider,
+            "workflow_id": run.workflow_ref.workflow_id,
+            "run_id": run.workflow_ref.run_id,
+        } if run.workflow_ref else None,
+        "recovery_evidence": run.recovery_evidence,
+    }, sort_keys=True))
+    store.close()
+    close = getattr(driver.client, "close", None)
+    if close:
+        maybe = close()
+        if asyncio.iscoroutine(maybe):
+            await maybe
+
 
 
 def _write_record(path: Path, record: dict[str, Any]) -> None:
@@ -168,8 +266,17 @@ async def _reconcile(args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="cloud-agent-runtime-recovery-probe")
-    parser.add_argument("command", choices=["start-intent", "reconcile"])
-    parser.add_argument("--state-file", required=True)
+    parser.add_argument(
+        "command",
+        choices=[
+            "start-intent",
+            "reconcile",
+            "crash-after-accepted-start",
+            "reconcile-sqlite",
+        ],
+    )
+    parser.add_argument("--state-file")
+    parser.add_argument("--sqlite-path")
     parser.add_argument("--run-id", default=os.environ.get("RECOVERY_RUN_ID", ""))
     parser.add_argument("--session-id", default=os.environ.get("RECOVERY_SESSION_ID", ""))
     parser.add_argument("--temporal-address", default=os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"))
@@ -177,12 +284,25 @@ def main() -> None:
     parser.add_argument("--task-queue", default=os.environ.get("TEMPORAL_TASK_QUEUE", "agent-runs"))
     args = parser.parse_args()
 
-    if args.command == "start-intent":
-        if not args.run_id.strip() or not args.session_id.strip():
-            parser.error("start-intent requires --run-id and --session-id")
-        asyncio.run(_start_intent(args))
+    if args.command in {"start-intent", "reconcile"}:
+        if not args.state_file:
+            parser.error("--state-file is required for start-intent/reconcile")
+        if args.command == "start-intent":
+            if not args.run_id.strip() or not args.session_id.strip():
+                parser.error("start-intent requires --run-id and --session-id")
+            asyncio.run(_start_intent(args))
+        else:
+            asyncio.run(_reconcile(args))
+        return
+
+    if not args.sqlite_path:
+        parser.error("--sqlite-path is required for process-recovery commands")
+    if args.command == "crash-after-accepted-start":
+        asyncio.run(_crash_after_accepted_start(args))
     else:
-        asyncio.run(_reconcile(args))
+        if not args.run_id.strip():
+            parser.error("reconcile-sqlite requires --run-id")
+        asyncio.run(_reconcile_sqlite(args))
 
 
 if __name__ == "__main__":
