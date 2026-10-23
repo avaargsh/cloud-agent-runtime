@@ -315,6 +315,11 @@ class AgentRuntime:
         if changed or remaining != binding.pending_cleanup_refs:
             binding.pending_cleanup_refs = remaining
             run.sandbox_binding = binding
+            # Run-level summary must remain unresolved if any owned resource
+            # still lacks an independent Gone observation. Per-resource
+            # recovery_evidence carries the exact outcomes.
+            if remaining:
+                run.recovery_state = "unknown"
             self.store.save_run(run)
         return run
 
