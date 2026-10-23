@@ -37,6 +37,7 @@ class AgentRuntime:
         self.sandbox_provider = sandbox_provider
         self.workflow_driver = workflow_driver
         self._sandboxes: dict[str, Sandbox] = {}
+        self._cleanup_ack_unknown_once = False
 
     @staticmethod
     def _transition_run(
@@ -232,7 +233,9 @@ class AgentRuntime:
         return self.cleanup_retired_sandboxes(run.run_id)
 
     def cleanup_retired_sandboxes(self, run_id: str) -> Run:
-        """Retry cleanup for sandboxes retired by a durable replacement."""
+        """Retry retired-sandbox cleanup until an independent provider query says Gone."""
+        from .temporal_driver import deterministic_cleanup_operation_id
+
         run = self.store.get_run(run_id)
         binding = self._ensure_binding(run)
         if binding is None or not binding.pending_cleanup_refs:
@@ -240,39 +243,132 @@ class AgentRuntime:
         if self.sandbox_provider is None:
             return run
 
+        original_refs = list(binding.pending_cleanup_refs)
         remaining: list[str] = []
         changed = False
-
-        for ref in binding.pending_cleanup_refs:
+        for ref in original_refs:
+            operation_id = deterministic_cleanup_operation_id(run_id, ref)
+            attempt = sum(
+                1 for event in run.recovery_evidence
+                if event.get("operation_id") == operation_id
+            ) + 1
             try:
                 provider, sandbox_id = self._parse_sandbox_ref(ref)
                 if provider != self.sandbox_provider.name:
                     remaining.append(ref)
+                    run.recovery_operation_id = operation_id
+                    run.recovery_state = "unknown"
+                    run.recovery_attempts = max(run.recovery_attempts, attempt)
+                    run.recovery_evidence.append({
+                        "operation_id": operation_id,
+                        "outcome": "blocked",
+                        "attempt": str(attempt),
+                        "detail": (
+                            f"cleanup provider mismatch: expected "
+                            f"{self.sandbox_provider.name}, got {provider}; "
+                            f"owner_run={run_id}; sandbox_ref={ref}"
+                        ),
+                    })
+                    changed = True
                     continue
+
                 retired = Sandbox(
                     sandbox_id=sandbox_id,
                     provider=provider,
                     status=SandboxStatus.BOUND,
                     session_id=run.session_id,
                 )
-                self.sandbox_provider.terminate(retired)
+                # Persist intent before every remote mutation. A timeout or
+                # lost response leaves the same reference pending and retryable.
+                run.recovery_operation_id = operation_id
+                run.recovery_state = "cleanup_pending"
+                run.recovery_attempts = max(run.recovery_attempts, attempt)
+                run.recovery_evidence.append({
+                    "operation_id": operation_id,
+                    "outcome": "intent_persisted",
+                    "attempt": str(attempt),
+                    "detail": f"owner_run={run_id}; sandbox_ref={ref}",
+                })
+                self.store.save_run(run)
+
+                try:
+                    self.sandbox_provider.terminate(retired)
+                    if self._cleanup_ack_unknown_once:
+                        self._cleanup_ack_unknown_once = False
+                        raise RuntimeError(
+                            "injected lost cleanup acknowledgement after provider side effect"
+                        )
+
+                    # A successful delete response is only a request receipt.
+                    # Require a separate Provider read proving the resource is Gone.
+                    observe_gone = getattr(self.sandbox_provider, "is_gone", None)
+                    if not callable(observe_gone):
+                        raise RuntimeError(
+                            "sandbox provider cannot independently confirm resource Gone"
+                        )
+                    if observe_gone(sandbox_id) is not True:
+                        raise RuntimeError(
+                            "provider has not independently confirmed resource Gone"
+                        )
+                    run.recovery_evidence.append({
+                        "operation_id": operation_id,
+                        "outcome": "observed_gone",
+                        "attempt": str(attempt),
+                        "detail": f"independent provider observation confirms Gone: {ref}",
+                    })
+                except Exception as exc:
+                    remaining.append(ref)
+                    run.recovery_state = "unknown"
+                    run.recovery_evidence.append({
+                        "operation_id": operation_id,
+                        "outcome": "unknown",
+                        "attempt": str(attempt),
+                        "detail": (
+                            f"cleanup unresolved after terminate/observation: "
+                            f"{type(exc).__name__}: {exc}; ownership retained for retry"
+                        ),
+                    })
+                    changed = True
+                    continue
+
                 changed = True
-                if (
-                    run.status == RunStatus.CANCELLED
-                    and ref == binding.sandbox_ref
-                ):
-                    # Commit cleanup completion atomically with removal from the
-                    # pending list. A failed save leaves both pieces unchanged.
+                run.recovery_state = "cleanup_acknowledged"
+                if run.status == RunStatus.CANCELLED and ref == binding.sandbox_ref:
                     run.metadata = {
                         **dict(run.metadata),
                         "cancel_cleanup_completed_ref": ref,
                     }
-            except Exception:
-                remaining.append(ref)
+                run.recovery_evidence.append({
+                    "operation_id": operation_id,
+                    "outcome": "acknowledged",
+                    "attempt": str(attempt),
+                    "detail": (
+                        f"terminate acknowledged and independent Gone observed; "
+                        f"owner_run={run_id}; sandbox_ref={ref}"
+                    ),
+                })
 
-        if changed or remaining != binding.pending_cleanup_refs:
+            except Exception as exc:
+                # Malformed refs and provider lookup errors are not proof of
+                # deletion. Preserve ownership and retry with evidence.
+                remaining.append(ref)
+                run.recovery_operation_id = operation_id
+                run.recovery_state = "unknown"
+                run.recovery_evidence.append({
+                    "operation_id": operation_id,
+                    "outcome": "blocked",
+                    "attempt": str(attempt),
+                    "detail": f"cleanup could not be verified: {type(exc).__name__}: {exc}",
+                })
+                changed = True
+
+        if changed or remaining != original_refs:
             binding.pending_cleanup_refs = remaining
             run.sandbox_binding = binding
+            # Run-level summary must not say cleanup completed while any
+            # resource still lacks authoritative Gone evidence.
+            if remaining:
+                run.recovery_state = "unknown"
             self.store.save_run(run)
 
         return run
