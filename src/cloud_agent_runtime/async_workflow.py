@@ -142,3 +142,39 @@ class InMemoryAsyncWorkflowDriver:
             raise RuntimeError(
                 f"simulated termination ACK lost for {operation_id}"
             )
+    async def query(
+        self,
+        workflow: WorkflowRef,
+        *,
+        name: str,
+        args: object | None = None,
+    ) -> dict[str, object]:
+        """Expose deterministic in-memory state for lifecycle reconciliation tests.
+
+        This driver is a contract test double, not a durable provider. It only
+        models an accepted workflow as running; tests requiring terminal state
+        must provide that state explicitly instead of treating this as provider
+        evidence.
+        """
+        if name != "run_state":
+            raise ValueError(f"unsupported in-memory workflow query: {name}")
+        started = next(
+            (
+                item for item in reversed(self.started)
+                if f"agent-run-{item['runtime_run_id']}" == workflow.workflow_id
+            ),
+            None,
+        )
+        if started is None:
+            raise KeyError(f"unknown in-memory workflow: {workflow.workflow_id}")
+        return {
+            "runtime_run_id": str(started["runtime_run_id"]),
+            "session_id": str(started["session_id"]),
+            "phase": "running",
+            "paused": False,
+            "terminal": False,
+            "approval_events": [],
+            "transition_events": [],
+            "evidence_refs": [],
+        }
+
