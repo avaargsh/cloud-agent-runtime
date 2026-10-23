@@ -1,61 +1,71 @@
 # P0 Recovery Acceptance Matrix
 
-Scope: Issue #30 only. This document separates code-level deterministic tests from real process/provider failure evidence.
+Scope: Issue #30 only. Do not use this matrix to claim production acceptance from mocks or Temporal's embedded test service.
 
-Evidence rules:
-- A passing unit or Temporal test-environment test is not proof of OS-level process restart against a live provider.
-- Record the exact tested commit SHA, workflow run URL, and artifact/log reference for every executed row.
-- If a provider outcome cannot be confirmed, keep ownership and status unresolved. Do not mint a new Run ID or start a replacement workflow.
-- Provider-side exactly-once behavior requires a provider idempotency contract; deterministic client keys alone do not establish it.
+## Evidence rules
 
-| ID | Scenario | Expected invariant | Evidence status |
+- Every executed result must name the exact commit SHA, workflow run URL, Python version, command, and evidence artifact.
+- The embedded Temporal SDK test service can validate request/response-drop mechanics and client recovery logic. It does not prove behavior against the deployed Temporal cluster.
+- A remote call timeout, connection reset, missing ACK, or caller death after send means the outcome is ambiguous until authoritative provider state resolves it.
+- Never create a replacement Run or Workflow to resolve ambiguity. Use the original Run ID, stable operation ID, and deterministic Workflow ID.
+- Stable client operation IDs are audit/correlation identities, not proof of provider-side exactly-once behavior.
+- If the server/provider state cannot be observed, leave the Run/operation unknown and retry observation—not the side effect.
+
+## Scenario matrix
+
+| ID | Scenario | Required assertion | Status / evidence |
 |---|---|---|---|
-| R01 | Run persisted; StartWorkflow is forwarded; response frames are dropped; caller SIGKILLed | Same Run ID and deterministic Workflow ID; no blind second start | TCP/gRPC proxy test added in `tests/test_temporal_ack_drop_proxy.py`; exact-head CI pending; test-server scope only |
-| R02 | Reconstruct runtime with same SQLite store after ambiguous start | Same Run ID recovered; query/attach by deterministic Workflow ID | Implemented test; CI pending for this PR |
-| R03 | Provider status query fails/unavailable after lost ACK | Run remains `unknown`; no duplicate workflow creation | Implemented fail-closed unit test; CI pending for this PR |
-| R04 | Duplicate attach to running workflow | Attach original workflow identity only | Existing Temporal driver test; exact-head CI pending |
-| R05 | Duplicate attach to terminal workflow | Fail closed; do not represent terminal execution as active | Existing Temporal driver test; exact-head CI pending |
-| R06 | Provider completed mutation but response/ACK was lost; retry with same operation ID | Keep ownership unresolved until provider acknowledgement or authoritative status verifies result | PARTIAL — deterministic cleanup ACK-loss test only; live provider NOT RUN |
-| R07 | Sandbox cleanup fails and is retried | Same Run-scoped cleanup operation ID, retry provenance retained, ref remains pending until acknowledged | Cleanup lost-ACK and retry tests exist in `tests/test_runtime.py`; exact-head CI pending |
-| R08 | Unknown cleanup provider / provider status | Keep old sandbox ref pending; record blocked/unknown evidence; never call the wrong provider | Negative test added in `tests/test_runtime.py`; exact-head CI pending |
-| R09 | Allocation succeeds, bind fails | Allocation identity retained sufficiently to retry/verify cleanup | PARTIAL — in-memory allocation/bind failure cleanup tests exist in `tests/test_sandbox_recovery.py`; durable provider intent and live-provider proof NOT RUN |
-| R10 | Pause/resume persistence failure | Store state and provider execution do not silently diverge | Unit tests exist in `tests/test_sandbox_recovery.py`; exact-head CI pending; process/provider-level fault proof NOT RUN |
-| R11 | Real Worker SIGKILL and restart while workflow is waiting / during signal delivery | Same workflow history, no duplicate execution, state reconciliation verified | NOT RUN — requires dedicated integration harness |
-| R12 | In-memory vs SQLite store semantic parity for recovery metadata | Same recovery state and operation ID after store reopen | Implemented SQLite recovery test; CI pending |
-| R13 | Caller subprocess is SIGKILLed after Temporal accepts start but before canonical Run stores WorkflowRef; new process reopens SQLite and reconciles | Same Run ID + deterministic Workflow ID; one start event and duplicate-start rejection | Covered by `tests/test_temporal_process_recovery.py`; exact-head CI pending. This scenario does not drop the response frames. |
-| R14 | TCP proxy forwards StartWorkflowExecution and drops its response HEADERS/DATA; caller remains blocked, is SIGKILLed, and a new process reconciles | Proxy logs show request forwarded and response dropped; the original Run/Workflow IDs survive; history has one start event and duplicate start is rejected | Test added in `tests/test_temporal_ack_drop_proxy.py`; exact-head CI pending. Uses the Temporal SDK test service, not production-provider acceptance. |
+| R01 | Run is durable; StartWorkflow request is forwarded; ACK frames dropped; caller is SIGKILLed | After a new process opens the same SQLite store, one original Run is attached to the original Workflow ID; provider history shows one start event; duplicate start is rejected | **PENDING exact-head CI** on the current PR #41 head `3c3860ff1e78d9018ad808080705f68236cc4f55`; source test is `tests/test_temporal_ack_drop_proxy.py`. Do not count as PASS until artifact exists. |
+| R02 | ACK ambiguous; reopen same SQLite state | Persisted Run ID and start operation ID remain identical; recovery attaches by deterministic ID | **PENDING exact-head CI** on `3c3860ff1e78d9018ad808080705f68236cc4f55`. |
+| R03 | Provider cannot verify status after ACK loss | Persist `unknown`; do not issue another Workflow start | **PENDING exact-head CI** on `3c3860ff1e78d9018ad808080705f68236cc4f55`. |
+| R04 | Duplicate attach to a running workflow | Return the same deterministic Workflow ID and execution identity | **PENDING exact-head CI**. |
+| R05 | Deterministic ID already refers to a terminal workflow | Fail closed; do not report a terminal workflow as running | **PENDING exact-head CI**. |
+| R06 | Provider executes a side effect but ACK is lost | Same stable provider operation identity on retry; authoritative provider inspection resolves outcome | **NOT RUN** — no real external side-effect provider fixture/service is available in this CI report. |
+| R07 | Sandbox cleanup executes but cleanup ACK is lost | Stable cleanup operation ID; retain pending cleanup reference until authoritative acknowledgement/inspection; append retry provenance | **PARTIAL** — deterministic provider-boundary tests exist, but live production-provider ACK-loss is **NOT RUN**. |
+| R08 | Cleanup provider/status is unknown | Do not invoke a different provider or discard the sandbox reference; operation stays unknown/pending | **PENDING exact-head CI**; live-provider verification **NOT RUN**. |
+| R09 | Sandbox allocation succeeds, bind fails | Preserve allocation identity and prove cleanup/reconciliation after restart | **NOT RUN** for durable external provider semantics; a best-effort in-memory cleanup is not sufficient. |
+| R10 | Pause/resume persistence failure | Record the failure boundary and reconcile store/workflow state before accepting new mutations | **NOT RUN** for process/provider-level injection. |
+| R11 | Worker OS process is SIGKILLed while waiting / signal delivery, then a separate Worker process restarts | Same Workflow ID and execution; duplicate signals are processed once; transition history remains consistent | **FAIL on PR #46 head `59966c9503019552fea39f655bf8fc6f0b4deca5`**: full pytest run [39955957118](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39955957118) reports 148 passed, 1 failed, 1 skipped. The failing test waited for the workflow to reach `waiting` but it remained `running`; do not accept this test until fixed and rerun. |
+| R12 | In-memory and SQLite stores preserve recovery operation/state semantics | Equivalent intent and operation identities survive serialization/reopen | **PENDING exact-head CI** on PR #41 SHA above. |
+| R13 | Separate caller process dies after Temporal accepts start but before local WorkflowRef bind; a new process reopens SQLite | Same Run ID and deterministic Workflow ID; one start event / duplicate start rejection | Test exists in `tests/test_temporal_process_recovery.py`; **PENDING exact-head CI** for PR #41 SHA above. This does not prove response-drop injection. |
+| R14 | TCP proxy forwards `StartWorkflowExecution`, then drops response frames; caller remains blocked, is SIGKILLed, and a new process reconciles | Proxy log proves forward + drop; process exit is SIGKILL; recovered identity is unchanged; history contains one start event | Test exists in `tests/test_temporal_ack_drop_proxy.py`; **PENDING exact-head CI**. Uses the Temporal SDK test service; production Temporal acceptance remains separate. |
 
-## Exact-head evidence log
+## Exact SHA evidence ledger
 
-| Commit SHA | Python 3.11 pytest | Python 3.12 pytest | Live process kill | Live Temporal lost-ACK | Artifact / logs |
+| Commit SHA | Standard full pytest | Dedicated P0 recovery tests | Worker SIGKILL recovery | Temporal Start ACK-drop proxy | Live external provider side-effect / cleanup ACK loss |
 |---|---|---|---|---|---|
-| `972f5314927131c6c8b5d402bc6305e7942d8a53` | BLOCKED — pre-existing `main` collection error: `cloud_agent_runtime.authoritative_identity` missing | BLOCKED — same collection error | NOT RUN | NOT RUN | [P0 focused acceptance workflow PASS on 3.11/3.12](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39951572280); [full pytest blocked](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39951572565); [AgentOS golden not counted](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39951572638). `tests/test_authoritative_identity.py` exists on `main` but imports missing `authoritative_identity.py` and `identity.py`; this branch did not implement P1 identity/credential modules. Live process/provider failure rows remain NOT RUN. |
+| `3c3860ff1e78d9018ad808080705f68236cc4f55` (PR #41 current head at the time of inspection) | **NO RUN RECORDED** for this SHA | **NO RUN RECORDED** for this SHA | Included in dedicated test command; exact-head result not recorded | Included in dedicated test command; exact-head result not recorded | **NOT RUN** |
+| `59966c9503019552fea39f655bf8fc6f0b4deca5` (PR #46 current head at inspection) | **FAIL**, [run 39955957118](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39955957118), 148 passed / 1 failed / 1 skipped | Not the same test scope | **FAIL**, same run; see failure above | **NOT RUN** in #46 test command | kind cleanup workflow was still in progress at inspection; production provider **NOT RUN** |
+| `65f3329e9edc8ba91b404babeab21b78714c84b6` (historical PR #41 head) | Historical current-base blocker noted in comments; do not substitute for current head | **PASS**, [run 39952876316](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39952876316) | The separate caller SIGKILL + SQLite reopen test passed in the focused run | **NOT RUN** at that revision | **NOT RUN** |
+| `972f5314927131c6c8b5d402bc6305e7942d8a53` (older historical revision) | **BLOCKED** at that revision by missing source modules; subsequent PR #45 restored those modules | Historical focused workflow passed; not a current-head result | **NOT RUN** | **NOT RUN** | **NOT RUN** |
 
-## Required commands for process-level experiment
+### Historical evidence is not current-head evidence
 
-The process-level scenario must run a separate caller process against a live Temporal test service and durable SQLite file:
+Earlier successful runs on older PR #41 commits (including [39952876316](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39952876316)) are historical evidence only. As of inspection, GitHub Actions returned no workflow run associated with PR #41 current head `3c3860ff1e78d9018ad808080705f68236cc4f55`. Do not promote an older green check to current-head PASS.
 
-1. Caller writes one canonical Run and stable start operation ID to SQLite.
-2. Caller sends start request to Temporal.
-3. Inject a transport/proxy fault after the server accepted the request but before the client receives the response, then SIGKILL the caller.
-4. Restart caller using the same SQLite file; call `reconcile_run(original_run_id)`.
-5. Assert exactly one Temporal Workflow Execution exists for the deterministic Workflow ID and the recovered `WorkflowRef` refers to it.
-6. Persist the report with Run ID, operation ID, Workflow ID, process exit signal, Temporal execution IDs/count, restart PID, exact commit SHA and CI artifact URL.
+## Required ACK-drop experiment
 
-Do not mark R01 passed when only a fake driver or in-process exception is used.
+For R01/R14 the test must prove all of these in one exact-SHA run:
 
+1. Persist one canonical Run and operation intent to durable storage before the RPC.
+2. Forward the HTTP/2 `StartWorkflowExecution` request to Temporal.
+3. Capture structured evidence that response frames for that RPC are dropped before the caller receives an ACK.
+4. SIGKILL the still-blocked caller process and assert the exit signal.
+5. Start a separate caller process against the same SQLite file.
+6. Attach / reconcile only through the original deterministic Workflow ID.
+7. Assert one Workflow Execution Started event and provider rejection of a duplicate start.
+8. Upload machine-readable proxy events and recovery evidence with tested SHA, Run ID, operation ID, Workflow ID, execution run ID, SIGKILL result, and action-run URL.
 
-## Caller process test harness
+If any prerequisite or assertion is missing, status remains **NOT RUN** or **BLOCKED**, not PASS.
 
-`cloud-agent-runtime-recovery-probe` is a small separate-process helper. It writes an intent record before requesting Temporal and supports a later `reconcile` process that can only attach by the stable Workflow ID. It is a harness component, not evidence by itself.
+## Sandbox cleanup evidence boundary
 
-A live ACK-loss experiment must be run against a disposable Temporal service via a TCP/gRPC fault proxy. The fault proxy must confirm it forwarded the start request and then drop/reset the response before the caller receives it. Run the probe as a subprocess, record its PID, kill it with SIGKILL while the response is blocked, then invoke `reconcile` from a new process against the same state file. The provider's workflow execution list must show exactly one Workflow ID and the returned workflow ref must match it.
+The external provider must expose a stable idempotency identity or an authoritative read operation that resolves whether the cleanup has committed. For ambiguous cleanup:
 
-Until the new proxy test passes on the exact current SHA and its evidence artifact is reviewed, R01 remains `PENDING CI`; production Temporal/provider ACK-loss is not accepted by this test alone. R11 (Worker restart while waiting/during signal delivery) remains `NOT RUN`. No CI result from the ordinary pytest matrix may be substituted for that evidence.
+- Keep the original sandbox reference in the durable pending list.
+- Reuse the same `sandbox-cleanup:<run_id>:<sandbox_ref>` operation ID.
+- Persist attempt number, error/timeout and subsequent acknowledgement/inspection evidence.
+- Do not allocate a replacement sandbox merely to hide uncertain cleanup.
+- Do not report a live production-provider guarantee based on an in-memory test, fake driver, or kind fixture alone.
 
-
-## Scope distinction: live process kill vs network ACK drop
-
-The dedicated process test launches a separate Python caller against Temporal's local test server. It persists the Run and operation intent in SQLite, waits until Temporal accepts the deterministic Workflow ID, then sends SIGKILL to the caller before the WorkflowRef can be committed to the RuntimeStore. A different process reopens the SQLite file, reconciles by the original Run ID, and checks that Temporal lists exactly one execution.
-
-This proves process death after server-side workflow acceptance and before local binding persistence. The new R14 test adds a TCP proxy that parses HTTP/2 request headers, forwards StartWorkflowExecution, drops that RPC's response frames, and captures evidence. It must pass on the exact current SHA before being accepted. The SDK test server is a controlled integration environment, not production Temporal or external-provider acceptance.
+Issue #30 stays open until the current PR-head matrix is green and live-provider rows are separately executed or explicitly accepted as blocked by the provider contract.
