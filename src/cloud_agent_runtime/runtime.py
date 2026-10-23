@@ -327,12 +327,24 @@ class AgentRuntime:
         session_id: str,
         sandbox_ref: str | None = None,
         budget: Budget | None = None,
+        run_id: str | None = None,
     ) -> Run:
         session = self.store.get_session(session_id)
         if session.status != SessionStatus.ACTIVE:
             raise ValueError("runs can only start on an active session")
 
-        run_id = str(uuid4())
+        if run_id is None:
+            run_id = str(uuid4())
+        elif not run_id.strip():
+            raise ValueError("run_id must not be empty")
+        else:
+            try:
+                self.store.get_run(run_id)
+            except KeyError:
+                pass
+            else:
+                raise ValueError(f"run already exists: {run_id}")
+
         owned_sandbox: Sandbox | None = None
         resolved_sandbox_ref = sandbox_ref
         sandbox_binding: SandboxBinding | None = None
