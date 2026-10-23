@@ -19,7 +19,7 @@ from .models import (
 )
 from .sandbox import Sandbox, SandboxProvider, SandboxStatus
 from .store import InMemoryStore, RuntimeStore
-from .workflow import WorkflowDriver
+from .workflow import WorkflowDriver, WorkflowRef
 
 
 class AgentRuntime:
@@ -265,12 +265,26 @@ class AgentRuntime:
         session_id: str,
         sandbox_ref: str | None = None,
         budget: Budget | None = None,
+        run_id: str | None = None,
+        _initial_status: RunStatus = RunStatus.RUNNING,
+        _initial_workflow_ref: WorkflowRef | None = None,
     ) -> Run:
         session = self.store.get_session(session_id)
         if session.status != SessionStatus.ACTIVE:
             raise ValueError("runs can only start on an active session")
 
-        run_id = str(uuid4())
+        if run_id is None:
+            run_id = str(uuid4())
+        elif not run_id.strip():
+            raise ValueError("run_id must not be empty")
+        else:
+            try:
+                self.store.get_run(run_id)
+            except KeyError:
+                pass
+            else:
+                raise ValueError(f"run already exists: {run_id}")
+
         owned_sandbox: Sandbox | None = None
         resolved_sandbox_ref = sandbox_ref
         sandbox_binding: SandboxBinding | None = None
@@ -296,10 +310,10 @@ class AgentRuntime:
         run = Run(
             run_id=run_id,
             session_id=session_id,
-            status=RunStatus.RUNNING,
+            status=_initial_status,
             sandbox_ref=resolved_sandbox_ref,
             sandbox_binding=sandbox_binding,
-            workflow_ref=None,
+            workflow_ref=_initial_workflow_ref,
             budget=budget,
         )
 
