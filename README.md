@@ -144,3 +144,16 @@ This repository is a thin **Run ↔ Workflow ↔ Sandbox lifecycle binding layer
 See `CONTRIBUTING.md`, `SECURITY.md`, and `CODE_OF_CONDUCT.md`.
 
 Licensed under Apache License 2.0. See `LICENSE`.
+
+
+## P0 Run recovery acceptance boundary
+
+This reference runtime distinguishes a confirmed provider result from an ambiguous remote outcome.
+
+- The canonical Run ID is persisted before workflow start.
+- Workflow start and sandbox retirement each use a deterministic operation ID scoped to the owning Run.
+- When a start request may have reached Temporal but its acknowledgement is lost, the Run records `unknown`; recovery must query/attach to the deterministic Workflow ID and must not start a replacement workflow.
+- Cleanup intent and each retry outcome are persisted with the same cleanup operation ID. A lost cleanup acknowledgement keeps the old sandbox reference in `pending_cleanup_refs` until a retry receives a verifiable acknowledgement.
+- A fake/in-memory provider test is not evidence of an OS-level process-kill or a live Temporal server fault test. Those scenarios are tracked separately in `docs/recovery-acceptance.md`, where unexecuted rows remain `NOT RUN`.
+
+Do not claim exactly-once external side effects unless the provider exposes a verifiable idempotency contract. Stable client operation identity alone does not prove provider-side deduplication.
