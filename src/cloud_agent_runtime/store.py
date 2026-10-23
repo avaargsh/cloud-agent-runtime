@@ -35,6 +35,16 @@ class InMemoryStore:
         self.runs: dict[str, Run] = {}
 
     def save_session(self, session: Session) -> None:
+        existing = self.sessions.get(session.session_id)
+        if existing is not None and (
+            existing.agent_id != session.agent_id
+            or existing.release_id != session.release_id
+            or existing.tenant_id != session.tenant_id
+        ):
+            raise ValueError(
+                "session identity is immutable: agent, release, and tenant "
+                "must match the existing session"
+            )
         self.sessions[session.session_id] = deepcopy(session)
 
     def get_session(self, session_id: str) -> Session:
@@ -44,6 +54,11 @@ class InMemoryStore:
             raise KeyError(f"unknown session: {session_id}") from exc
 
     def save_run(self, run: Run) -> None:
+        existing = self.runs.get(run.run_id)
+        if existing is not None and existing.session_id != run.session_id:
+            raise ValueError(
+                "run identity is immutable: session_id must match the existing run"
+            )
         self.runs[run.run_id] = deepcopy(run)
 
     def get_run(self, run_id: str) -> Run:
@@ -83,16 +98,34 @@ class SQLiteStore:
             separators=(",", ":"),
             sort_keys=True,
         )
-        self._connection.execute(
-            """
-            INSERT INTO sessions(session_id, payload)
-            VALUES (?, ?)
-            ON CONFLICT(session_id)
-            DO UPDATE SET payload = excluded.payload
-            """,
-            (session.session_id, payload),
-        )
-        self._connection.commit()
+        # Serialize the read/validate/write sequence so concurrent callers
+        # cannot rebind an existing canonical session ID to another identity.
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            row = self._connection.execute(
+                "SELECT payload FROM sessions WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()
+            if row is not None:
+                existing = session_from_dict(json.loads(row[0]))
+                if (
+                    existing.agent_id != session.agent_id
+                    or existing.release_id != session.release_id
+                    or existing.tenant_id != session.tenant_id
+                ):
+                    raise ValueError(
+                        "session identity is immutable: agent, release, and "
+                        "tenant must match the existing session"
+                    )
+            self._connection.execute(
+                """
+                INSERT INTO sessions(session_id, payload)
+                VALUES (?, ?)
+                ON CONFLICT(session_id)
+                DO UPDATE SET payload = excluded.payload
+                """,
+                (session.session_id, payload),
+            )
 
     def get_session(self, session_id: str) -> Session:
         row = self._connection.execute(
@@ -111,16 +144,31 @@ class SQLiteStore:
             separators=(",", ":"),
             sort_keys=True,
         )
-        self._connection.execute(
-            """
-            INSERT INTO runs(run_id, payload)
-            VALUES (?, ?)
-            ON CONFLICT(run_id)
-            DO UPDATE SET payload = excluded.payload
-            """,
-            (run.run_id, payload),
-        )
-        self._connection.commit()
+        # A canonical Run may advance state and bindings, but it cannot be
+        # reassigned to another Session. BEGIN IMMEDIATE makes validation and
+        # upsert one serialized transaction across SQLite connections.
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            row = self._connection.execute(
+                "SELECT payload FROM runs WHERE run_id = ?",
+                (run.run_id,),
+            ).fetchone()
+            if row is not None:
+                existing = run_from_dict(json.loads(row[0]))
+                if existing.session_id != run.session_id:
+                    raise ValueError(
+                        "run identity is immutable: session_id must match "
+                        "the existing run"
+                    )
+            self._connection.execute(
+                """
+                INSERT INTO runs(run_id, payload)
+                VALUES (?, ?)
+                ON CONFLICT(run_id)
+                DO UPDATE SET payload = excluded.payload
+                """,
+                (run.run_id, payload),
+            )
 
     def get_run(self, run_id: str) -> Run:
         row = self._connection.execute(
