@@ -1,3 +1,4 @@
+import hashlib
 import ssl
 
 import pytest
