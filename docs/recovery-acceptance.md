@@ -27,7 +27,7 @@ Evidence rules:
 
 | Commit SHA | Python 3.11 pytest | Python 3.12 pytest | Live process kill | Live Temporal lost-ACK | Artifact / logs |
 |---|---|---|---|---|---|
-| `e0b060f3d764d8489cc5f534931e64149a324e0e` | BLOCKED — pre-existing `main` collection error: `cloud_agent_runtime.authoritative_identity` missing | BLOCKED — same collection error | NOT RUN | NOT RUN | [P0 focused acceptance workflow PASS on 3.11/3.12](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39951362147); [full pytest blocked](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39951362099). `tests/test_authoritative_identity.py` exists on `main` but imports missing `authoritative_identity.py` and `identity.py`; this branch did not implement P1 identity/credential modules. Live process/provider failure rows remain NOT RUN. |
+| `e0b060f3d764d8489cc5f534931e64149a324e0e` | BLOCKED — pre-existing `main` collection error: `cloud_agent_runtime.authoritative_identity` missing | BLOCKED — same collection error | NOT RUN | NOT RUN | [P0 focused acceptance workflow PASS on 3.11/3.12](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39951362147); [full pytest blocked](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39951362099); [AgentOS golden cancelled, not counted](https://github.com/avaargsh/cloud-agent-runtime/actions/runs/39951362144). `tests/test_authoritative_identity.py` exists on `main` but imports missing `authoritative_identity.py` and `identity.py`; this branch did not implement P1 identity/credential modules. Live process/provider failure rows remain NOT RUN. |
 
 ## Required commands for process-level experiment
 
