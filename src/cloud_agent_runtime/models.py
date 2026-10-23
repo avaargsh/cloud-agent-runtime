@@ -69,3 +69,7 @@ class Run:
     approvals: list[Approval] = field(default_factory=list)
     budget: Budget | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
+    recovery_operation_id: str | None = None
+    recovery_state: str = "none"
+    recovery_attempts: int = 0
+    recovery_evidence: list[dict[str, str]] = field(default_factory=list)
