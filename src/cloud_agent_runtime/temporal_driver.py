@@ -22,22 +22,6 @@ def deterministic_cleanup_operation_id(run_id: str, sandbox_ref: str) -> str:
     return f"sandbox-cleanup:{run_id}:{sandbox_ref}"
 
 
-def deterministic_start_operation_id(runtime_run_id: str) -> str:
-    """Stable start-operation identity scoped to the canonical Run."""
-    if not runtime_run_id or not runtime_run_id.strip():
-        raise ValueError("runtime_run_id must be non-empty")
-    return f"agent-run-start:{runtime_run_id}"
-
-
-def deterministic_cleanup_operation_id(run_id: str, sandbox_ref: str) -> str:
-    """Stable retirement operation identity for one Run/sandbox pair."""
-    if not run_id or not run_id.strip():
-        raise ValueError("run_id must be non-empty")
-    if not sandbox_ref or not sandbox_ref.strip():
-        raise ValueError("sandbox_ref must be non-empty")
-    return f"sandbox-cleanup:{run_id}:{sandbox_ref}"
-
-
 _TERMINAL_WORKFLOW_STATUSES = {
     "COMPLETED",
     "FAILED",
