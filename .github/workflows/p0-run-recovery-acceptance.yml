@@ -11,9 +11,13 @@ on:
       - "src/cloud_agent_runtime/models.py"
       - "src/cloud_agent_runtime/serialization.py"
       - "src/cloud_agent_runtime/runtime.py"
+      - "src/cloud_agent_runtime/sandbox.py"
+      - "src/cloud_agent_runtime/kubernetes_sandbox.py"
       - "src/cloud_agent_runtime/recovery_probe.py"
       - "tests/test_async_runtime.py"
       - "tests/test_runtime.py"
+      - "tests/test_sandbox_recovery.py"
+      - "tests/test_kubernetes_sandbox.py"
       - "tests/test_temporal_driver.py"
       - "tests/test_temporal_process_recovery.py"
       - "tests/test_temporal_ack_drop_proxy.py"
@@ -43,7 +47,7 @@ jobs:
           P0_RECOVERY_EVIDENCE_DIR: recovery-report
         run: |
           mkdir -p recovery-report
-          pytest -q tests/test_async_runtime.py tests/test_runtime.py tests/test_temporal_driver.py tests/test_temporal_process_recovery.py tests/test_temporal_ack_drop_proxy.py
+          pytest -q tests/test_async_runtime.py tests/test_runtime.py tests/test_sandbox_recovery.py tests/test_kubernetes_sandbox.py tests/test_temporal_driver.py tests/test_temporal_process_recovery.py tests/test_temporal_ack_drop_proxy.py
       - name: Record acceptance evidence
         if: always()
         env:
@@ -56,7 +60,7 @@ jobs:
           exact_commit_sha=$TESTED_SHA
           python_version=$PYTHON_VERSION
           focused_test_job_status=$JOB_STATUS
-          focused_test_command=pytest -q tests/test_async_runtime.py tests/test_runtime.py tests/test_temporal_driver.py tests/test_temporal_process_recovery.py tests/test_temporal_ack_drop_proxy.py
+          focused_test_command=pytest -q tests/test_async_runtime.py tests/test_runtime.py tests/test_sandbox_recovery.py tests/test_kubernetes_sandbox.py tests/test_temporal_driver.py tests/test_temporal_process_recovery.py tests/test_temporal_ack_drop_proxy.py
           live_external_provider_side_effect_ack_loss=NOT RUN
           live_provider_cleanup_ack_loss=NOT RUN
           production_cluster_cleanup_acceptance=BLOCKED until the deployed provider and target cluster are available
