@@ -132,7 +132,7 @@ class TerminateFailAsyncDriver(InMemoryAsyncWorkflowDriver):
         raise RuntimeError("simulated async termination failure")
 
 
-def test_async_binding_persistence_failure_terminates_workflow():
+def test_async_binding_persistence_failure_keeps_pending_reference():
     async def scenario():
         store = FailOnRunSaveNumberStore(fail_on=2)
         driver = InMemoryAsyncWorkflowDriver()
@@ -166,7 +166,7 @@ def test_async_binding_persistence_failure_terminates_workflow():
     asyncio.run(scenario())
 
 
-def test_async_termination_failure_retains_workflow_ref():
+def test_async_binding_persistence_failure_does_not_attempt_ambiguous_cleanup():
     async def scenario():
         store = FailOnRunSaveNumberStore(fail_on=2)
         driver = TerminateFailAsyncDriver()
