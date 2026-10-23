@@ -178,7 +178,12 @@ class CredentialBroker(Protocol):
     def revoke_run(self, run_id: str) -> int:
         ...
 
-    def revoke_approval(self, approval_id: str) -> int:
+    def revoke_approval(
+        self,
+        approval_id: str,
+        *,
+        event_id: str | None = None,
+    ) -> int:
         ...
 
 
@@ -383,7 +388,12 @@ class InMemoryCredentialBroker:
                     count += 1
             return count
 
-    def revoke_approval(self, approval_id: str) -> int:
+    def revoke_approval(
+        self,
+        approval_id: str,
+        *,
+        event_id: str | None = None,
+    ) -> int:
         with self._lock:
             self._revoked_approvals.add(approval_id)
             count = 0
