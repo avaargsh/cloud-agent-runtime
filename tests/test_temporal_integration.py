@@ -499,8 +499,16 @@ def test_temporal_worker_process_sigkill_restarts_same_workflow_identity(tmp_pat
             handle = None
             first_execution_run_id = None
             try:
+                # Disable sticky workflow caching on Worker A as well as
+                # Worker B. Otherwise the Temporal test server may keep
+                # routing recovery to the dead process's sticky queue.
                 worker_a = spawn_worker(
-                    target, task_queue, repository_root, worker_a_log, worker_log_handles
+                    target,
+                    task_queue,
+                    repository_root,
+                    worker_a_log,
+                    worker_log_handles,
+                    max_cached_workflows=0,
                 )
                 workers.append(worker_a)
                 handle = await env.client.start_workflow(
