@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import timedelta
+import math
 from typing import Any
 
 from temporalio import workflow
@@ -90,12 +92,43 @@ class AgentRunWorkflow:
             if ref not in self._state.evidence_refs:
                 self._state.evidence_refs.append(ref)
 
-        await workflow.wait_condition(
-            lambda: (
-                self._state is not None
-                and self._state.terminal
-            )
+        is_terminal = lambda: (
+            self._state is not None and self._state.terminal
         )
+        timeout_raw = payload.get("timeout_seconds")
+        if timeout_raw is None:
+            await workflow.wait_condition(is_terminal)
+        else:
+            if isinstance(timeout_raw, bool) or not isinstance(
+                timeout_raw, (int, float)
+            ):
+                raise ValueError("timeout_seconds must be a finite positive number")
+            timeout_seconds = float(timeout_raw)
+            if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+                raise ValueError("timeout_seconds must be a finite positive number")
+            try:
+                await workflow.wait_condition(
+                    is_terminal,
+                    timeout=timedelta(seconds=timeout_seconds),
+                    timeout_summary="Agent Run deadline exceeded",
+                )
+            except TimeoutError:
+                # The Temporal timer is part of workflow history, so replaying
+                # after a worker restart reaches the same deterministic result.
+                if not is_terminal():
+                    self._transition(
+                        to_phase="failed",
+                        event_type="run_timed_out",
+                        event_id=str(
+                            payload.get("timeout_event_id")
+                            or f"timeout:{self._state.runtime_run_id}"
+                        ),
+                        evidence_refs=list(self._state.evidence_refs),
+                    )
+                    self._state.error = (
+                        f"run timed out after {timeout_seconds:g} seconds"
+                    )
+                    self._state.terminal = True
 
         assert self._state is not None
         return {
