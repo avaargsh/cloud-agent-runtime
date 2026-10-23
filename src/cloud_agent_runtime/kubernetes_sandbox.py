@@ -107,6 +107,8 @@ class KubernetesSandboxProvider:
         return self.bind(sandbox, session_id=session_id)
 
     def terminate(self, sandbox: Sandbox) -> Sandbox:
+        # Delete acceptance is not proof of deletion: --wait=false returns
+        # before the API server necessarily reports the Pod as Gone.
         result = self._kubectl([
             "-n", self.namespace, "delete", "pod", sandbox.sandbox_id,
             "--ignore-not-found=true", "--wait=false",
@@ -115,3 +117,18 @@ class KubernetesSandboxProvider:
             raise RuntimeError(result.stderr.strip())
         sandbox.status = SandboxStatus.TERMINATED
         return sandbox
+
+    def is_gone(self, sandbox_id: str) -> bool:
+        """Independently query the API server; unknown errors fail closed."""
+        result = self._kubectl([
+            "-n", self.namespace, "get", "pod", sandbox_id, "-o", "name",
+        ])
+        if result.returncode == 0:
+            return False
+        detail = f"{result.stdout}\n{result.stderr}".lower()
+        if "not found" in detail or "notfound" in detail:
+            return True
+        raise RuntimeError(
+            f"could not independently establish whether Pod {sandbox_id} is Gone: "
+            f"{result.stderr.strip()}"
+        )
