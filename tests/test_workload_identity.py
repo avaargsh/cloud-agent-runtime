@@ -437,6 +437,7 @@ def test_unknown_scope_verbs_require_approval_in_reference_broker():
         session_id="session-a",
         run_id="run-unknown-scope",
         sandbox_id="sandbox-a",
+        sandbox_revision=1,
         workspace_ref="sandbox://kubernetes/sandbox-a",
         binding_id=binding.binding_id,
         capability=binding.capability,
