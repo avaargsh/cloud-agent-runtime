@@ -179,6 +179,10 @@ def run_to_dict(run: Run) -> dict[str, Any]:
             else None
         ),
         "metadata": dict(run.metadata),
+        "recovery_operation_id": run.recovery_operation_id,
+        "recovery_state": run.recovery_state,
+        "recovery_attempts": run.recovery_attempts,
+        "recovery_evidence": [dict(item) for item in run.recovery_evidence],
     }
 
 
@@ -221,4 +225,11 @@ def run_from_dict(data: dict[str, Any]) -> Run:
         ],
         budget=Budget(**budget_data) if budget_data is not None else None,
         metadata=dict(data.get("metadata", {})),
+        recovery_operation_id=data.get("recovery_operation_id"),
+        recovery_state=str(data.get("recovery_state", "none")),
+        recovery_attempts=int(data.get("recovery_attempts", 0)),
+        recovery_evidence=[
+            {str(key): str(value) for key, value in item.items()}
+            for item in data.get("recovery_evidence", [])
+        ],
     )
