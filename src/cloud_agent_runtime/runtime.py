@@ -36,6 +36,7 @@ class AgentRuntime:
         self.sandbox_provider = sandbox_provider
         self.workflow_driver = workflow_driver
         self._sandboxes: dict[str, Sandbox] = {}
+        self._cleanup_ack_unknown_once = False
 
     @staticmethod
     def _sandbox_ref(sandbox: Sandbox) -> str:
@@ -259,6 +260,9 @@ class AgentRuntime:
 
                 try:
                     self.sandbox_provider.terminate(retired)
+                    if self._cleanup_ack_unknown_once:
+                        self._cleanup_ack_unknown_once = False
+                        raise RuntimeError("injected lost cleanup acknowledgement after provider side effect")
                 except Exception as exc:
                     remaining.append(ref)
                     run.recovery_state = "unknown"
