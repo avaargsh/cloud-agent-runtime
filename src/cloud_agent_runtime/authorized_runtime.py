@@ -124,6 +124,8 @@ class AuthorizedAgentRuntime:
         session: Session,
         binding: CredentialBinding,
     ) -> WorkloadIdentity:
+        if session.status != SessionStatus.ACTIVE:
+            raise IdentityAuthorizationError("credentials are unavailable to an inactive session")
         if run.status != RunStatus.RUNNING:
             raise IdentityAuthorizationError("credentials are available only to running runs")
         persisted = run.sandbox_binding
@@ -211,11 +213,13 @@ class AuthorizedAgentRuntime:
         principal: AuthenticatedPrincipal,
         *,
         run_id: str,
-        snapshot_ref: str | None = None,
         rebind_key: str | None = None,
     ) -> Run:
-        self._owned_run(principal, run_id)
+        run, _ = self._owned_run(principal, run_id)
         self._credential_broker.revoke_run(run_id)
+        # Snapshot refs are taken only from canonical persisted state. Accepting
+        # a caller-selected ref could attach another Run's checkpoint/workspace.
+        snapshot_ref = run.sandbox_snapshot_ref
         return self._runtime.rebind_run_sandbox(
             run_id,
             snapshot_ref=snapshot_ref,
@@ -255,13 +259,14 @@ class AuthorizedAgentRuntime:
         evidence_refs=None,
     ) -> Run:
         self._owned_run(principal, run_id)
-        result = self._runtime.complete_run(
+        # Invalidate leases before changing Run state or producing terminal
+        # side effects; a failed completion must not leave old authority alive.
+        self._credential_broker.revoke_run(run_id)
+        return self._runtime.complete_run(
             run_id,
             artifact_refs=artifact_refs,
             evidence_refs=evidence_refs,
         )
-        self._credential_broker.revoke_run(run_id)
-        return result
 
     def cancel_run(
         self,
@@ -284,10 +289,3 @@ class AuthorizedAgentRuntime:
             evidence_refs=evidence_refs,
         )
 
-    def revoke_approval(self, approval_id: str) -> int:
-        """Called by a trusted approval-revocation event, not by tenant requests."""
-        if self._approval_resolver is not None:
-            revoke = getattr(self._approval_resolver, "revoke", None)
-            if revoke is not None:
-                revoke(approval_id)
-        return self._credential_broker.revoke_approval(approval_id)
