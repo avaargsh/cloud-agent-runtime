@@ -14,6 +14,7 @@ import pytest
 
 from cloud_agent_runtime import AgentRuntime, InMemoryWorkflowDriver, SQLiteStore
 from cloud_agent_runtime.kubernetes_sandbox import KubernetesSandboxProvider
+from cloud_agent_runtime.temporal_driver import deterministic_cleanup_operation_id
 
 
 pytestmark = pytest.mark.skipif(
@@ -121,6 +122,21 @@ def test_kubernetes_cleanup_timeout_recovers_after_runtime_restart(tmp_path):
         assert cancelled.metadata.get("cancel_cleanup_completed_ref") is None
         assert ambiguous_kubectl.delete_requests == 1
 
+        cleanup_operation_id = deterministic_cleanup_operation_id(
+            original["run_id"], original["sandbox_ref"]
+        )
+        before_restart = first_store.get_run(original["run_id"])
+        first_cleanup_events = [
+            event for event in before_restart.recovery_evidence
+            if event["operation_id"] == cleanup_operation_id
+        ]
+        assert before_restart.recovery_operation_id == cleanup_operation_id
+        assert before_restart.recovery_state == "unknown"
+        assert [event["outcome"] for event in first_cleanup_events] == [
+            "intent_persisted", "unknown"
+        ]
+        assert [event["attempt"] for event in first_cleanup_events] == ["1", "1"]
+
         # The API server accepted deletion even though the caller saw a timeout.
         # The canonical Run must retain retry intent until a later request confirms
         # cleanup; it must not allocate another sandbox to recover this Run.
@@ -149,6 +165,16 @@ def test_kubernetes_cleanup_timeout_recovers_after_runtime_restart(tmp_path):
         assert durable_before_retry.sandbox_binding.pending_cleanup_refs == [
             original["sandbox_ref"]
         ]
+        durable_cleanup_events = [
+            event for event in durable_before_retry.recovery_evidence
+            if event["operation_id"] == cleanup_operation_id
+        ]
+        assert durable_before_retry.recovery_operation_id == cleanup_operation_id
+        assert durable_before_retry.recovery_state == "unknown"
+        assert [event["outcome"] for event in durable_cleanup_events] == [
+            "intent_persisted", "unknown"
+        ]
+        assert [event["attempt"] for event in durable_cleanup_events] == ["1", "1"]
         assert durable_session.session_id == original["session_id"]
         assert durable_session.agent_id == "recovery-test-agent"
         assert durable_session.release_id == "recovery-test-release"
@@ -172,6 +198,22 @@ def test_kubernetes_cleanup_timeout_recovers_after_runtime_restart(tmp_path):
             recovered.metadata["cancel_cleanup_completed_ref"]
             == original["sandbox_ref"]
         )
+        recovered_cleanup_events = [
+            event for event in recovered.recovery_evidence
+            if event["operation_id"] == cleanup_operation_id
+        ]
+        assert recovered.recovery_operation_id == cleanup_operation_id
+        assert recovered.recovery_state == "cleanup_acknowledged"
+        assert [event["outcome"] for event in recovered_cleanup_events] == [
+            "intent_persisted",
+            "unknown",
+            "intent_persisted",
+            "observed_gone",
+            "acknowledged",
+        ]
+        assert [event["attempt"] for event in recovered_cleanup_events] == [
+            "1", "1", "2", "2", "2",
+        ]
         assert [
             (event["from_status"], event["to_status"])
             for event in recovered.transition_events
