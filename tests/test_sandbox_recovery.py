@@ -1106,3 +1106,27 @@ def test_cancel_signal_failure_still_cleans_sandbox_once():
     )
     assert replay.status.value == "cancelled"
     assert provider.terminated_ids == [sandbox_id]
+
+
+def test_cancel_does_not_fail_for_external_sandbox_reference():
+    runtime = AgentRuntime(workflow_driver=InMemoryWorkflowDriver())
+    session = runtime.create_session(
+        agent_id="sre-agent",
+        release_id="release-v1",
+        tenant_id="tenant-a",
+    )
+    external_ref = "external-sandbox://provider/resource-42"
+    run = runtime.start_run(
+        session_id=session.session_id,
+        sandbox_ref=external_ref,
+    )
+
+    cancelled = runtime.cancel_run(
+        run.run_id,
+        reason="operator requested cancellation",
+        event_id="cancel-external-sandbox",
+    )
+
+    assert cancelled.status.value == "cancelled"
+    assert cancelled.sandbox_ref == external_ref
+    assert cancelled.sandbox_binding is None
