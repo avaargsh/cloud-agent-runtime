@@ -203,12 +203,8 @@ class _CredentialRecord:
 
 
 def _scope_needs_approval(scope: str) -> bool:
-    return scope.rsplit(":", 1)[-1].lower() in {
-        "write",
-        "delete",
-        "admin",
-        "mutate",
-    }
+    # Unknown scope verbs require approval; only explicit read-like scopes bypass it.
+    return scope.rsplit(":", 1)[-1].lower() not in {"read", "list", "metadata"}
 
 
 class InMemoryApprovalResolver:
