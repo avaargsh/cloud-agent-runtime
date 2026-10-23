@@ -63,7 +63,7 @@ def test_async_runtime_starts_workflow_and_signals_approval() -> None:
     asyncio.run(scenario())
 
 
-def test_async_workflow_start_failure_marks_run_failed() -> None:
+def test_async_workflow_start_failure_preserves_ambiguous_outcome() -> None:
     class FailingDriver:
         name = "failing"
 
@@ -73,7 +73,7 @@ def test_async_workflow_start_failure_marks_run_failed() -> None:
         async def signal(self, *args, **kwargs):
             return None
 
-        async def terminate_run(self, workflow, *, reason):
+        async def terminate_run(self, workflow, *, reason, operation_id=None):
             return None
 
     async def scenario():
@@ -87,15 +87,20 @@ def test_async_workflow_start_failure_marks_run_failed() -> None:
             tenant_id="tenant-a",
         )
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="temporal unavailable"):
             await runtime.start_run(
                 session_id=session.session_id,
+                run_id="run-start-ack-unknown",
             )
 
-        runs = list(runtime.store.runs.values())
-        assert len(runs) == 1
-        assert runs[0].status == RunStatus.FAILED
-        assert runtime._sandboxes == {}
+        run = runtime.store.get_run("run-start-ack-unknown")
+        assert run.status == RunStatus.RUNNING
+        assert run.recovery_state == "unknown"
+        assert run.recovery_operation_id == "agent-run-start:run-start-ack-unknown"
+        assert run.workflow_ref is None
+        # The provider may have accepted the remote start, so the runtime must
+        # preserve its execution resources rather than unconditionally cleaning.
+        assert len(runtime._sandboxes) == 1
 
     asyncio.run(scenario())
 
