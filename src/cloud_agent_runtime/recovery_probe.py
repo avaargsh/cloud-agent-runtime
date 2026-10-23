@@ -7,9 +7,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-from temporalio.client import Client
-from temporalio.exceptions import WorkflowAlreadyStartedError
-
 from .temporal_driver import TemporalWorkflowDriver, deterministic_start_operation_id
 
 
