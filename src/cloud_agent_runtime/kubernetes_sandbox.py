@@ -152,3 +152,18 @@ class KubernetesSandboxProvider:
             raise RuntimeError(result.stderr.strip())
         sandbox.status = SandboxStatus.TERMINATED
         return sandbox
+
+    def is_gone(self, sandbox_id: str) -> bool:
+        """Independently observe Pod absence; ambiguous API errors fail closed."""
+        result = self._invoke_kubectl([
+            "-n", self.namespace, "get", "pod", sandbox_id, "-o", "name",
+        ])
+        if result.returncode == 0:
+            return False
+        detail = f"{result.stdout}\n{result.stderr}".lower()
+        if "not found" in detail or "notfound" in detail:
+            return True
+        raise RuntimeError(
+            f"could not independently establish whether Pod {sandbox_id} is Gone: "
+            f"{result.stderr.strip()}"
+        )
