@@ -15,7 +15,7 @@ Scope: Issue #30 only. Do not use this matrix to claim production acceptance fro
 
 | ID | Scenario | Required assertion | Status / evidence |
 |---|---|---|---|
-| R01 | Run is durable; StartWorkflow request is forwarded; ACK frames dropped; caller is SIGKILLed | After a new process opens the same SQLite store, one original Run is attached to the original Workflow ID; provider history shows one start event; duplicate start is rejected | **PENDING exact-head CI** on the current PR #41 head `3c3860ff1e78d9018ad808080705f68236cc4f55`; source test is `tests/test_temporal_ack_drop_proxy.py`. Do not count as PASS until artifact exists. |
+| R01 | Run is durable; StartWorkflow request is forwarded; ACK frames dropped; caller is SIGKILLed | After a new process opens the same SQLite store, one original Run is attached to the original Workflow ID; provider history shows one start event; duplicate start is rejected | **PENDING exact-head CI** on the current PR #41 head `34f14e4ac710e5e32fadb8f52598fb03701fbe25`; source test is `tests/test_temporal_ack_drop_proxy.py`. Do not count as PASS until artifact exists. |
 | R02 | ACK ambiguous; reopen same SQLite state | Persisted Run ID and start operation ID remain identical; recovery attaches by deterministic ID | **PENDING exact-head CI** on `3c3860ff1e78d9018ad808080705f68236cc4f55`. |
 | R03 | Provider cannot verify status after ACK loss | Persist `unknown`; do not issue another Workflow start | **PENDING exact-head CI** on `3c3860ff1e78d9018ad808080705f68236cc4f55`. |
 | R04 | Duplicate attach to a running workflow | Return the same deterministic Workflow ID and execution identity | **PENDING exact-head CI**. |
@@ -69,3 +69,11 @@ The external provider must expose a stable idempotency identity or an authoritat
 - Do not report a live production-provider guarantee based on an in-memory test, fake driver, or kind fixture alone.
 
 Issue #30 stays open until the current PR-head matrix is green and live-provider rows are separately executed or explicitly accepted as blocked by the provider contract.
+
+
+## Ledger update after documentation/workflow correction
+
+- Updated recovery report blob SHA: `45fed897ff7ba4ce9a44e0e76191686593200328`.
+- Updated focused workflow blob SHA: `ef0249fa26e081e55ffc3402cbdeefa6dc58124b`.
+- The commit created by these sequential edits is `34f14e4ac710e5e32fadb8f52598fb03701fbe25`; fresh exact-head CI is required and had not appeared at the time of this write.
+- PR #46 Worker A SIGKILL / Worker B replay test failure remains independently recorded on `59966c9503019552fea39f655bf8fc6f0b4deca5`. The test currently never transitions from `running` to the awaited `waiting` state before SIGKILL. It is a failing test, not accepted recovery evidence.
