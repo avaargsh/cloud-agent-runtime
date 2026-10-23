@@ -17,11 +17,11 @@ class KubectlResult:
 
 
 class KubernetesSandboxProvider:
-    """Small kubectl-backed provider for disposable kind recovery proofs.
+    """Kubectl-backed disposable sandbox for recovery and isolation proofs.
 
-    This is intentionally not a general production sandbox implementation.
-    It creates one Pod per sandbox and uses provider identity/loss as the
-    integration boundary for the Run recovery contract.
+    Network egress is deny-all until an explicitly reviewed policy extension is
+    added. Each sandbox has its own emptyDir workspace; PVC/hostPath persistence
+    is deliberately unsupported by this reference provider.
     """
 
     name = "kubernetes"
@@ -60,28 +60,118 @@ class KubernetesSandboxProvider:
         probe = self._kubectl(["get", "namespace", self.namespace, "-o", "name"])
         if probe.returncode != 0:
             self._check(["create", "namespace", self.namespace])
+        # Never silently use a namespace without the intended Pod Security
+        # admission profile. Policy-label failure blocks sandbox allocation.
+        self._check([
+            "label",
+            "namespace",
+            self.namespace,
+            "pod-security.kubernetes.io/enforce=restricted",
+            "pod-security.kubernetes.io/audit=restricted",
+            "pod-security.kubernetes.io/warn=restricted",
+            "--overwrite",
+        ])
 
-    def allocate(self) -> Sandbox:
-        self.ensure_namespace()
-        sandbox_id = f"agent-sandbox-{uuid4().hex[:12]}"
-        manifest = {
+    def _network_policy(self, sandbox_id: str) -> dict[str, object]:
+        labels = {
+            "app.kubernetes.io/name": "agent-sandbox",
+            "agent.sandbox-id": sandbox_id,
+        }
+        return {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": {
+                "name": sandbox_id,
+                "namespace": self.namespace,
+                "labels": labels,
+            },
+            "spec": {
+                "podSelector": {
+                    "matchLabels": {"agent.sandbox-id": sandbox_id},
+                },
+                "policyTypes": ["Ingress", "Egress"],
+                "ingress": [],
+                "egress": [],
+            },
+        }
+
+    def _pod(self, sandbox_id: str) -> dict[str, object]:
+        return {
             "apiVersion": "v1",
             "kind": "Pod",
             "metadata": {
                 "name": sandbox_id,
                 "namespace": self.namespace,
-                "labels": {"app.kubernetes.io/name": "agent-sandbox"},
+                "labels": {
+                    "app.kubernetes.io/name": "agent-sandbox",
+                    "agent.sandbox-id": sandbox_id,
+                },
             },
             "spec": {
                 "restartPolicy": "Never",
+                "automountServiceAccountToken": False,
+                "securityContext": {
+                    "runAsNonRoot": True,
+                    "runAsUser": 10001,
+                    "runAsGroup": 10001,
+                    "fsGroup": 10001,
+                    "seccompProfile": {"type": "RuntimeDefault"},
+                },
                 "containers": [{
                     "name": "sandbox",
                     "image": self.image,
                     "command": ["sh", "-c", "trap : TERM INT; sleep infinity & wait"],
+                    "securityContext": {
+                        "allowPrivilegeEscalation": False,
+                        "readOnlyRootFilesystem": True,
+                        "capabilities": {"drop": ["ALL"]},
+                    },
+                    "resources": {
+                        "requests": {
+                            "cpu": "100m",
+                            "memory": "64Mi",
+                            "ephemeral-storage": "64Mi",
+                        },
+                        "limits": {
+                            "cpu": "500m",
+                            "memory": "256Mi",
+                            "ephemeral-storage": "1Gi",
+                        },
+                    },
+                    "volumeMounts": [
+                        {"name": "workspace", "mountPath": "/workspace"},
+                        {"name": "tmp", "mountPath": "/tmp"},
+                    ],
                 }],
+                "volumes": [
+                    {"name": "workspace", "emptyDir": {"sizeLimit": "1Gi"}},
+                    {"name": "tmp", "emptyDir": {"sizeLimit": "256Mi"}},
+                ],
             },
         }
-        self._check(["apply", "-f", "-"], stdin=json.dumps(manifest))
+
+    def allocate(self) -> Sandbox:
+        self.ensure_namespace()
+        sandbox_id = f"agent-sandbox-{uuid4().hex[:12]}"
+
+        # Install the deny-all policy before the Pod can start. If Pod creation
+        # fails, best-effort deletion removes the unused policy without hiding
+        # the original allocation failure.
+        self._check(
+            ["apply", "-f", "-"],
+            stdin=json.dumps(self._network_policy(sandbox_id)),
+        )
+        try:
+            self._check(["apply", "-f", "-"], stdin=json.dumps(self._pod(sandbox_id)))
+        except Exception:
+            try:
+                self._kubectl([
+                    "-n", self.namespace, "delete", "networkpolicy", sandbox_id,
+                    "--ignore-not-found=true", "--wait=false",
+                ])
+            except Exception:
+                pass
+            raise
         return Sandbox(sandbox_id, self.name, SandboxStatus.ALLOCATED)
 
     def bind(self, sandbox: Sandbox, *, session_id: str) -> Sandbox:
@@ -94,10 +184,10 @@ class KubernetesSandboxProvider:
         return sandbox
 
     def snapshot(self, sandbox: Sandbox) -> Sandbox:
-        # Kubernetes Pod state is intentionally not treated as durable state.
-        # The snapshot ref names the durable Run checkpoint supplied by the
-        # upper runtime layer; a replacement Pod is always newly allocated.
-        sandbox.snapshot_ref = f"k8s-checkpoint://{sandbox.sandbox_id}"
+        # This provider has no filesystem snapshot implementation. The ref is
+        # a lifecycle marker only and must not be treated as durable workspace
+        # content; durable artifacts belong in the separately authorized store.
+        sandbox.snapshot_ref = f"k8s-lifecycle://{sandbox.sandbox_id}"
         sandbox.status = SandboxStatus.PAUSED
         return sandbox
 
@@ -107,11 +197,15 @@ class KubernetesSandboxProvider:
         return self.bind(sandbox, session_id=session_id)
 
     def terminate(self, sandbox: Sandbox) -> Sandbox:
-        result = self._kubectl([
+        # Delete the Pod before its policy. If policy deletion fails, retry is
+        # safe and the already-deleted Pod cannot retain workspace data.
+        self._check([
             "-n", self.namespace, "delete", "pod", sandbox.sandbox_id,
             "--ignore-not-found=true", "--wait=false",
         ])
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip())
+        self._check([
+            "-n", self.namespace, "delete", "networkpolicy", sandbox.sandbox_id,
+            "--ignore-not-found=true", "--wait=false",
+        ])
         sandbox.status = SandboxStatus.TERMINATED
         return sandbox
