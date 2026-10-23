@@ -8,6 +8,10 @@ from .workflow import WorkflowRef
 class AsyncWorkflowDriver(Protocol):
     name: str
 
+    def reference_for_run(self, runtime_run_id: str) -> WorkflowRef:
+        """Return the deterministic provider reference before any side effect."""
+        ...
+
     async def start_run(
         self,
         *,
@@ -41,17 +45,20 @@ class InMemoryAsyncWorkflowDriver:
         self.signals: list[tuple[str, str, dict]] = []
         self.terminated: list[tuple[str, str]] = []
 
+    def reference_for_run(self, runtime_run_id: str) -> WorkflowRef:
+        return WorkflowRef(
+            provider=self.name,
+            workflow_id=f"workflow-{runtime_run_id}",
+            run_id=runtime_run_id,
+        )
+
     async def start_run(
         self,
         *,
         runtime_run_id: str,
         session_id: str,
     ) -> WorkflowRef:
-        return WorkflowRef(
-            provider=self.name,
-            workflow_id=f"workflow-{runtime_run_id}",
-            run_id=runtime_run_id,
-        )
+        return self.reference_for_run(runtime_run_id)
 
     async def signal(
         self,
