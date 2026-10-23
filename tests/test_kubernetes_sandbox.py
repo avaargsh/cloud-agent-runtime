@@ -1,3 +1,7 @@
+import subprocess
+
+import pytest
+
 from cloud_agent_runtime import AgentRuntime, InMemoryWorkflowDriver
 from cloud_agent_runtime.kubernetes_sandbox import KubernetesSandboxProvider, KubectlResult
 
@@ -77,3 +81,52 @@ def test_terminate_is_orphan_cleanup_safe():
     delete_calls = [args for args, _ in kubectl.calls if "delete" in args]
     assert len(delete_calls) == 2
     assert all("--ignore-not-found=true" in args for args in delete_calls)
+
+
+
+def test_delete_timeout_is_ambiguous_and_retry_uses_same_sandbox_id():
+    class TimeoutAfterDelete(FakeKubectl):
+        def __init__(self):
+            super().__init__()
+            self.injected = False
+
+        def __call__(self, args, *, stdin=None):
+            result = super().__call__(args, stdin=stdin)
+            if "delete" in args and "pod" in args and not self.injected:
+                # Model the API accepting deletion while the caller loses ACK.
+                self.injected = True
+                raise subprocess.TimeoutExpired(
+                    cmd=["kubectl", *args],
+                    timeout=0.01,
+                )
+            return result
+
+    kubectl = TimeoutAfterDelete()
+    provider = KubernetesSandboxProvider(
+        kubectl_timeout_seconds=0.25,
+        kubectl=kubectl,
+    )
+    sandbox = provider.bind(provider.allocate(), session_id="session-stable")
+    original_id = sandbox.sandbox_id
+
+    with pytest.raises(RuntimeError, match="outcome may be unknown"):
+        provider.terminate(sandbox)
+
+    assert kubectl.injected is True
+    assert original_id not in kubectl.pods
+    assert sandbox.sandbox_id == original_id
+    assert sandbox.status.value == "bound"
+
+    # Retry the same idempotent delete after the ACK was lost.
+    terminated = provider.terminate(sandbox)
+    assert terminated.sandbox_id == original_id
+    assert terminated.status.value == "terminated"
+    delete_calls = [args for args, _ in kubectl.calls if "delete" in args]
+    assert len(delete_calls) == 2
+    assert all("--ignore-not-found=true" in args for args in delete_calls)
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan"), True])
+def test_kubectl_command_timeout_must_be_finite_and_positive(timeout):
+    with pytest.raises(ValueError, match="command_timeout_seconds"):
+        KubernetesSandboxProvider(command_timeout_seconds=timeout)
