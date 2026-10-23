@@ -680,6 +680,31 @@ class AgentRuntime:
             self._sandboxes.pop(run_id, None)
         return run
 
+    def _signal_cancelled_workflow(self, run: Run) -> None:
+        """Signal durable cancellation, attempting resource cleanup on failure."""
+        if self.workflow_driver is None or run.workflow_ref is None:
+            return
+        payload = {
+            "event_id": run.metadata.get("cancel_event_id") or None,
+            "reason": run.metadata["terminal_reason"],
+            "evidence_refs": json.loads(run.metadata["cancel_evidence_refs"]),
+        }
+        try:
+            self.workflow_driver.signal(
+                run.workflow_ref,
+                name="cancel_run",
+                payload=payload,
+            )
+        except Exception:
+            # Cancellation is already durable. Try to stop resource consumption
+            # even if the signal channel is unavailable; cleanup errors must not
+            # replace the original workflow signal error.
+            try:
+                self._finish_cancel_sandbox_cleanup(run.run_id)
+            except Exception:
+                pass
+            raise
+
     def cancel_run(
         self,
         run_id: str,
@@ -715,18 +740,7 @@ class AgentRuntime:
             # cleanup was made part of the cancellation contract.
             if self._queue_cancel_sandbox_cleanup(run):
                 self.store.save_run(run)
-            if self.workflow_driver is not None and run.workflow_ref is not None:
-                self.workflow_driver.signal(
-                    run.workflow_ref,
-                    name="cancel_run",
-                    payload={
-                        "event_id": run.metadata.get("cancel_event_id") or None,
-                        "reason": run.metadata["terminal_reason"],
-                        "evidence_refs": json.loads(
-                            run.metadata["cancel_evidence_refs"]
-                        ),
-                    },
-                )
+            self._signal_cancelled_workflow(run)
             return self._finish_cancel_sandbox_cleanup(run_id)
 
         if run.status in (RunStatus.SUCCEEDED, RunStatus.FAILED):
@@ -746,16 +760,7 @@ class AgentRuntime:
         self._queue_cancel_sandbox_cleanup(run)
         self.store.save_run(run)
 
-        if self.workflow_driver is not None and run.workflow_ref is not None:
-            self.workflow_driver.signal(
-                run.workflow_ref,
-                name="cancel_run",
-                payload={
-                    "event_id": event_id,
-                    "reason": reason,
-                    "evidence_refs": refs,
-                },
-            )
+        self._signal_cancelled_workflow(run)
         return self._finish_cancel_sandbox_cleanup(run_id)
 
     def complete_run(
