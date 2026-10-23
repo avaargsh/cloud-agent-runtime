@@ -237,3 +237,25 @@ def test_temporal_driver_reconcile_start_fails_closed_when_describe_has_no_statu
         return {"status": None}
 
     asyncio.run(scenario())
+
+
+
+def test_temporal_driver_reconcile_start_rejects_terminal_workflow() -> None:
+    async def scenario():
+        from cloud_agent_runtime.temporal_driver import deterministic_start_operation_id
+
+        client = FakeClient()
+        client.handle.status = "COMPLETED"
+        driver = TemporalWorkflowDriver(client=client, task_queue="agent-runs")
+        with pytest.raises(
+            TemporalWorkflowConflict,
+            match="existing Temporal workflow is terminal",
+        ):
+            await driver.reconcile_start(
+                runtime_run_id="run-terminal",
+                session_id="session-terminal",
+                operation_id=deterministic_start_operation_id("run-terminal"),
+            )
+        assert client.started == []
+
+    asyncio.run(scenario())
