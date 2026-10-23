@@ -101,3 +101,68 @@ def test_pause_resume_and_complete() -> None:
     assert "evidence://run/post-check" in state[
         "evidence_refs"
     ]
+
+def test_phase_transitions_emit_correlated_audit_evidence() -> None:
+    workflow = initialized_workflow()
+
+    workflow.pause_run({"event_id": "pause-7"})
+    workflow.resume_run({"event_id": "resume-8"})
+    workflow.complete_run(
+        {
+            "event_id": "complete-9",
+            "result": {"summary": "done"},
+            "evidence_refs": ["evidence://run/verified"],
+        }
+    )
+    # Terminal signals are ignored and must not append a fake transition.
+    workflow.fail_run({"event_id": "late-failure", "error": "late"})
+
+    state = workflow.run_state()
+    events = state["transition_events"]
+    assert [(event["from_phase"], event["to_phase"]) for event in events] == [
+        ("running", "paused"),
+        ("paused", "running"),
+        ("running", "succeeded"),
+    ]
+    assert [event["sequence"] for event in events] == [1, 2, 3]
+    assert [event["transition_id"] for event in events] == [
+        "run-1:transition:1",
+        "run-1:transition:2",
+        "run-1:transition:3",
+    ]
+    assert all(event["runtime_run_id"] == "run-1" for event in events)
+    assert all(event["session_id"] == "session-1" for event in events)
+    assert events[-1]["event_id"] == "complete-9"
+    assert events[-1]["evidence_refs"] == ["evidence://run/verified"]
+
+
+def test_cancel_is_terminal_and_audited() -> None:
+    workflow = initialized_workflow()
+
+    workflow.cancel_run(
+        {
+            "event_id": "cancel-42",
+            "reason": "operator requested cancellation",
+            "evidence_refs": ["evidence://ops/cancel-approval"],
+        }
+    )
+    workflow.complete_run({"result": {"summary": "must not win"}})
+
+    state = workflow.run_state()
+    assert state["phase"] == "cancelled"
+    assert state["terminal"] is True
+    assert state["error"] == "operator requested cancellation"
+    assert state["evidence_refs"] == ["evidence://ops/cancel-approval"]
+    assert len(state["transition_events"]) == 1
+    assert state["transition_events"][0] == {
+        "transition_id": "run-1:transition:1",
+        "runtime_run_id": "run-1",
+        "session_id": "session-1",
+        "sequence": 1,
+        "event_type": "cancel_run",
+        "event_id": "cancel-42",
+        "from_phase": "running",
+        "to_phase": "cancelled",
+        "evidence_refs": ["evidence://ops/cancel-approval"],
+    }
+
