@@ -84,3 +84,10 @@ Issue #30 stays open until the current PR-head matrix is green and live-provider
 - PR #41 description was synchronized to this head and reiterates that its TCP proxy test needs exact-head evidence.
 - No P0-focused workflow run or status check was returned for this exact SHA at inspection time. This is **NO RUN RECORDED**, not PASS or FAIL.
 - Historical green run `39952876316` is on SHA `65f3329e9edc8ba91b404babeab21b78714c84b6` and is not current-head proof.
+
+
+## Final inspection after PR metadata synchronization
+
+- PR #41 head moved to `2d1e929d7ccf841760c102775bcc8c931d5fc384` after the acceptance-matrix commit; no exact-SHA run was returned at inspection.
+- The next proposed workflow edit changed the workflow blob again without a corresponding tracked PR head in this inspection sequence. Do not infer a CI execution from that blob alone.
+- No merge or acceptance claim is made. Keep all exact-head rows pending until the PR head is fixed and its Actions runs/artifacts are captured.
