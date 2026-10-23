@@ -101,3 +101,45 @@ def test_pause_resume_and_complete() -> None:
     assert "evidence://run/post-check" in state[
         "evidence_refs"
     ]
+
+
+def test_transition_evidence_is_deduplicated_and_available_in_query() -> None:
+    workflow = initialized_workflow()
+    payload = {
+        "approval_id": "approval-1",
+        "approved": True,
+        "actor": "operator@example",
+        "evidence_refs": ["evidence://approval/shared"],
+    }
+    workflow.approval_resolved(payload)
+    workflow.approval_resolved(payload)
+
+    state = workflow.run_state()
+    assert len(state["approval_events"]) == 1
+    assert state["evidence_refs"] == ["evidence://approval/shared"]
+    assert state["transition_events"] == [{
+        "event_id": "approval:approval-1",
+        "event_type": "approval_granted",
+        "phase": "running",
+        "evidence_refs": ["evidence://approval/shared"],
+    }]
+
+
+def test_terminal_run_rejects_later_pause_resume_and_completion() -> None:
+    workflow = initialized_workflow()
+    workflow.complete_run({
+        "event_id": "complete-1",
+        "result": {"summary": "done"},
+        "evidence_refs": ["evidence://run/final"],
+    })
+    completed = workflow.run_state()
+
+    workflow.pause_run({"event_id": "late-pause"})
+    workflow.resume_run({"event_id": "late-resume"})
+    workflow.fail_run({"event_id": "late-fail", "error": "late failure"})
+
+    state = workflow.run_state()
+    assert state["phase"] == "succeeded"
+    assert state["terminal"] is True
+    assert state["transition_events"] == completed["transition_events"]
+    assert state["evidence_refs"] == ["evidence://run/final"]
