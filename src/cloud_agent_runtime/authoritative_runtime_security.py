@@ -55,6 +55,28 @@ class RoleRoutedAuthorityTransport:
         raise RuntimeError("authoritative request is not assigned to a service role")
 
 
+class RoleRoutedApprovalTransport:
+    """Separate read-only approval lookup from approval-authority revocation."""
+
+    def __init__(
+        self,
+        *,
+        reader: JsonAuthorityTransport,
+        revoker: JsonAuthorityTransport,
+    ) -> None:
+        if reader is revoker:
+            raise ValueError("approval reader and approval revoker transports must be distinct")
+        self._reader = reader
+        self._revoker = revoker
+
+    def request(self, method, path, body=None):
+        if method == "GET" and path.startswith("/v1/authorization/approvals/") and not path.endswith(":revoke"):
+            return self._reader.request(method, path, body)
+        if method == "POST" and path.startswith("/v1/authorization/approvals/") and path.endswith(":revoke"):
+            return self._revoker.request(method, path, body)
+        raise RuntimeError("approval request is not assigned to a service role")
+
+
 @dataclass(frozen=True)
 class AuthoritativeRuntimeSecurity:
     """Production-configuration bundle; it is not proof the authority is deployed."""
@@ -84,15 +106,17 @@ def build_authoritative_runtime_security(
     issue_service_token_provider: Callable[[], str],
     introspection_service_token_provider: Callable[[], str],
     credential_revocation_token_provider: Callable[[], str],
-    approval_authority_token_provider: Callable[[], str],
+    approval_reader_token_provider: Callable[[], str],
+    approval_revocation_token_provider: Callable[[], str],
     issuer: str = "cloud-agent-runtime",
     timeout_seconds: float = 3.0,
     clock: Callable[[], float] = time.time,
 ) -> AuthoritativeRuntimeSecurity:
     """Compose fail-closed Runtime adapters with separate authority service roles.
 
-    Operator configuration must supply four distinct service credentials:
-    issuer, introspector, credential revoker, and approval authority. This
+    Operator configuration must supply five distinct service credentials:
+    issuer, introspector, credential revoker, approval reader, and approval
+    revoker. This
     function uses verified TLS, bounded responses/timeouts, and disabled
     redirects for every HTTPS client. The remote API itself must implement the
     versioned contract in docs/authoritative-identity-integration.md.
@@ -106,9 +130,10 @@ def build_authoritative_runtime_security(
         issue_service_token_provider,
         introspection_service_token_provider,
         credential_revocation_token_provider,
-        approval_authority_token_provider,
+        approval_reader_token_provider,
+        approval_revocation_token_provider,
     )
-    if len({id(provider) for provider in providers}) != 4:
+    if len({id(provider) for provider in providers}) != 5:
         raise ValueError("each authority service role requires a distinct token provider")
     if not authority_base_url.startswith("https://"):
         raise ValueError("authoritative identity requires HTTPS")
@@ -128,10 +153,19 @@ def build_authoritative_runtime_security(
         service_token_provider=credential_revocation_token_provider,
         timeout_seconds=timeout_seconds,
     )
-    approval_transport = HttpsJsonAuthorityTransport(
+    approval_reader_transport = HttpsJsonAuthorityTransport(
         base_url=authority_base_url,
-        service_token_provider=approval_authority_token_provider,
+        service_token_provider=approval_reader_token_provider,
         timeout_seconds=timeout_seconds,
+    )
+    approval_revocation_transport = HttpsJsonAuthorityTransport(
+        base_url=authority_base_url,
+        service_token_provider=approval_revocation_token_provider,
+        timeout_seconds=timeout_seconds,
+    )
+    routed_approval_transport = RoleRoutedApprovalTransport(
+        reader=approval_reader_transport,
+        revoker=approval_revocation_transport,
     )
 
     routed_broker_transport = RoleRoutedAuthorityTransport(
@@ -144,7 +178,7 @@ def build_authoritative_runtime_security(
         assertion_issuer=assertion_issuer,
         clock=clock,
     )
-    approvals = AuthoritativeApprovalResolver(approval_transport, clock=clock)
+    approvals = AuthoritativeApprovalResolver(routed_approval_transport, clock=clock)
     fanout = ApprovalRevocationFanout(
         approvals=approvals,
         broker=broker,
