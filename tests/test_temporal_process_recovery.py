@@ -8,6 +8,7 @@ import sqlite3
 import sys
 from uuid import uuid4
 
+from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
@@ -93,14 +94,27 @@ def test_real_subprocess_sigkill_after_temporal_acceptance_reconciles_sqlite(tmp
                 assert recovered["recovery_operation_id"] == operation_id
                 assert recovered["workflow_ref"]["workflow_id"] == workflow_id
 
-                executions = []
-                async for execution in env.client.list_workflows():
-                    if execution.id == workflow_id:
-                        executions.append(execution)
-                assert len(executions) == 1, (
-                    f"expected one Temporal execution for {workflow_id}; "
-                    f"found {len(executions)}"
-                )
+                # Temporal's embedded time-skipping test server does not
+                # implement ListWorkflowExecutions. Prove non-duplication with
+                # the deterministic Workflow ID's existing handle and the
+                # server's duplicate-start rejection instead.
+                handle = env.client.get_workflow_handle(workflow_id)
+                description = await handle.describe()
+                assert description.status.name == "RUNNING"
+                try:
+                    await env.client.start_workflow(
+                        AgentRunWorkflow.run,
+                        {
+                            "runtime_run_id": run_id,
+                            "session_id": persisted["session_id"],
+                        },
+                        id=workflow_id,
+                        task_queue=task_queue,
+                    )
+                except WorkflowAlreadyStartedError:
+                    pass
+                else:
+                    raise AssertionError("Temporal accepted a duplicate deterministic Workflow ID")
 
                 with sqlite3.connect(db_path) as connection:
                     final_payload = connection.execute(
