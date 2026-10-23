@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
-from temporalio.workflow import imports_passed_through
+from temporalio.workflow import unsafe
 
-with imports_passed_through():
+with unsafe.imports_passed_through():
     from urllib.request import (
         HTTPRedirectHandler,
         HTTPSHandler,
