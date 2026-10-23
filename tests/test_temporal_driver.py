@@ -180,3 +180,20 @@ def test_temporal_driver_rejects_duplicate_when_status_cannot_be_verified() -> N
             )
 
     asyncio.run(scenario())
+
+
+def test_temporal_driver_forwards_timeout_to_workflow_input() -> None:
+    async def scenario():
+        client = FakeClient()
+        driver = TemporalWorkflowDriver(client=client, task_queue="agent-runs")
+        await driver.start_run(
+            runtime_run_id="run-with-timeout",
+            session_id="session-timeout",
+            timeout_seconds=21.0,
+        )
+        assert client.started[0]["args"][0] == {
+            "runtime_run_id": "run-with-timeout",
+            "session_id": "session-timeout",
+            "timeout_seconds": 21.0,
+        }
+    asyncio.run(scenario())
