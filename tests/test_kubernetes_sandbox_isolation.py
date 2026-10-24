@@ -4,6 +4,7 @@ from subprocess import CompletedProcess
 import pytest
 
 from cloud_agent_runtime import AgentRuntime, InMemoryStore, SQLiteStore
+from cloud_agent_runtime.models import Run, RunStatus, Session, SessionStatus
 from cloud_agent_runtime.kubernetes_sandbox import KubectlResult, KubernetesSandboxProvider
 from cloud_agent_runtime.store import SandboxAllocationIntent
 
@@ -313,3 +314,44 @@ def test_recoverable_provider_fails_closed_without_intent_store_contract():
         args[:2] == ("create", "namespace")
         for args, _ in kubectl.calls
     )
+
+
+def test_reconcile_keeps_cleanup_intent_until_persisted_sandbox_binding_matches(tmp_path):
+    kubectl = FakeKubectl()
+    provider = KubernetesSandboxProvider(kubectl=kubectl)
+    sandbox_id = "agent-sandbox-unbound1"
+    sandbox = provider.allocate_with_id(sandbox_id)
+    namespace = provider._namespace_for(sandbox_id)
+    store = SQLiteStore(tmp_path / "unbound-run.db")
+    session = Session(
+        session_id="session-unbound",
+        agent_id="coding-agent",
+        release_id="coding-agent-v1",
+        tenant_id="tenant-a",
+        status=SessionStatus.ACTIVE,
+    )
+    store.save_session(session)
+    # A stale/legacy Run may still have the convenience sandbox_ref but no
+    # authoritative SandboxBinding. It must not be used to discard the durable
+    # cleanup intent or leave this Namespace behind.
+    store.save_run(Run(
+        run_id="run-unbound",
+        session_id=session.session_id,
+        status=RunStatus.RUNNING,
+        sandbox_ref=f"sandbox://kubernetes/{sandbox_id}",
+        sandbox_binding=None,
+    ))
+    store.save_allocation_intent(SandboxAllocationIntent(
+        run_id="run-unbound",
+        session_id=session.session_id,
+        provider="kubernetes",
+        sandbox_id=sandbox_id,
+        state="cleanup_pending",
+    ))
+
+    AgentRuntime(store=store, sandbox_provider=provider)
+
+    assert namespace not in kubectl.namespaces
+    assert provider.is_gone(sandbox_id) is True
+    assert store.list_allocation_intents() == []
+    store.close()
