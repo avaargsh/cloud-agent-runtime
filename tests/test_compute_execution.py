@@ -74,6 +74,8 @@ class RecordingComputeClient(StaticBindingClient):
         self.store = store
         self.requests: list[dict[str, Any]] = []
         self.bindings: list[dict[str, Any]] = []
+        self.release_requests: list[dict[str, Any]] = []
+        self.release_bindings: list[dict[str, Any]] = []
         self.binding_resolution_count = 0
 
     async def resolve_binding(
@@ -115,6 +117,37 @@ class RecordingComputeClient(StaticBindingClient):
             "providerBindingGeneration": binding["providerBindingGeneration"],
             "observedGeneration": 0,
             "state": "REQUESTED",
+            "providerRefs": [],
+            "conditions": [],
+            "evidenceRefs": [],
+        }
+
+    async def release_or_reconcile(
+        self,
+        release_request: dict[str, Any],
+        *,
+        request: dict[str, Any],
+        binding: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self.store is not None:
+            run = self.store.get_run(request["correlation"]["runId"])
+            assert run.compute_release_request == release_request
+            assert run.compute_request == request
+            assert run.compute_binding == binding
+        await asyncio.sleep(0)
+        self.release_requests.append(copy.deepcopy(release_request))
+        self.release_bindings.append(copy.deepcopy(binding))
+        return {
+            "requestId": request["requestId"],
+            "projectId": request["projectId"],
+            "computePoolId": request["computePoolId"],
+            "workloadId": request["workload"]["id"],
+            "generation": release_request["expectedGeneration"],
+            "clusterId": binding["clusterId"],
+            "provider": binding["provider"],
+            "providerBindingGeneration": binding["providerBindingGeneration"],
+            "observedGeneration": 0,
+            "state": "RELEASING",
             "providerRefs": [],
             "conditions": [],
             "evidenceRefs": [],
@@ -632,5 +665,148 @@ def test_release_cannot_be_claimed_with_provider_refs_remaining() -> None:
                 image=IMAGE,
                 command=["python", "-m", "train"],
             )
+
+    asyncio.run(scenario())
+
+
+
+def test_release_uses_distinct_persisted_request_and_retains_create_identity() -> None:
+    async def scenario() -> None:
+        store = InMemoryStore()
+        _runtime, session, run = runtime_with_run(store)
+        client = RecordingComputeClient(store)
+        router = ExecutionProfileRouter(store=store, compute_client=client)
+        gpu_profile = profile(
+            "gpu-workload",
+            {"mode": "required", "class": "h100-80g", "quota": 1},
+        )
+        created = await router.dispatch(
+            run.run_id,
+            profile=gpu_profile,
+            compute_pool_id="pool-a",
+            image=IMAGE,
+            command=["python", "-m", "train"],
+        )
+        assert created is not None
+        create_request = copy.deepcopy(store.get_run(run.run_id).compute_request)
+        assert create_request is not None
+
+        releasing = await router.release(run.run_id, allocation=created)
+        assert releasing["state"] == "RELEASING"
+        assert releasing["requestId"] == create_request["requestId"]
+        persisted_release = store.get_run(run.run_id).compute_release_request
+        assert persisted_release is not None
+        assert persisted_release["apiVersion"] == "compute.release-request/v0.1"
+        assert re.fullmatch(r"[0-9a-f]{32}", persisted_release["requestId"])
+        assert persisted_release["requestId"] != create_request["requestId"]
+        assert persisted_release["sourceRequestId"] == create_request["requestId"]
+        assert persisted_release["expectedGeneration"] == created["generation"] == 1
+        assert persisted_release["correlation"] == {
+            "agentId": session.agent_id,
+            "sessionId": session.session_id,
+            "runId": run.run_id,
+        }
+
+        replay = await router.release(run.run_id, allocation=releasing)
+        assert replay["state"] == "RELEASING"
+        assert replay["requestId"] == create_request["requestId"]
+        assert len(client.release_requests) == 2
+        assert client.release_requests[0] == client.release_requests[1] == persisted_release
+        assert client.release_requests[0]["requestId"] != client.requests[0]["requestId"]
+
+    asyncio.run(scenario())
+
+
+def test_release_intent_survives_sqlite_restart_and_lost_ack(tmp_path) -> None:
+    class LoseFirstReleaseAck(RecordingComputeClient):
+        def __init__(self, store: Any | None = None) -> None:
+            super().__init__(store)
+            self.fail_first = True
+
+        async def release_or_reconcile(
+            self,
+            release_request: dict[str, Any],
+            *,
+            request: dict[str, Any],
+            binding: dict[str, Any],
+        ) -> dict[str, Any]:
+            if self.fail_first:
+                self.fail_first = False
+                if self.store is not None:
+                    assert self.store.get_run(request["correlation"]["runId"]).compute_release_request == release_request
+                self.release_requests.append(copy.deepcopy(release_request))
+                raise ConnectionError("simulated release ACK loss after commit")
+            return await super().release_or_reconcile(
+                release_request,
+                request=request,
+                binding=binding,
+            )
+
+    async def scenario() -> None:
+        db_path = tmp_path / "compute-release.sqlite"
+        store_before = SQLiteStore(db_path)
+        _runtime_before, _session, run = runtime_with_run(store_before)
+        create_client = RecordingComputeClient(store_before)
+        router_before = ExecutionProfileRouter(store=store_before, compute_client=create_client)
+        gpu_profile = profile(
+            "gpu-workload",
+            {"mode": "required", "class": "h100-80g", "quota": 1},
+        )
+        created = await router_before.dispatch(
+            run.run_id,
+            profile=gpu_profile,
+            compute_pool_id="pool-a",
+            image=IMAGE,
+            command=["python", "-m", "train"],
+        )
+        assert created is not None
+        client_before = LoseFirstReleaseAck(store_before)
+        router_before = ExecutionProfileRouter(store=store_before, compute_client=client_before)
+        with pytest.raises(ConnectionError, match="release ACK loss"):
+            await router_before.release(run.run_id, allocation=created)
+        release_before = copy.deepcopy(store_before.get_run(run.run_id).compute_release_request)
+        assert release_before is not None
+        store_before.close()
+
+        store_after = SQLiteStore(db_path)
+        recovered_run = store_after.get_run(run.run_id)
+        assert recovered_run.compute_release_request == release_before
+        assert recovered_run.compute_request is not None
+        assert recovered_run.compute_binding == route_binding()
+        client_after = RecordingComputeClient(store_after)
+        router_after = ExecutionProfileRouter(store=store_after, compute_client=client_after)
+        result = await router_after.release(run.run_id, allocation=created)
+        assert result["state"] == "RELEASING"
+        assert result["requestId"] == recovered_run.compute_request["requestId"]
+        assert client_after.release_requests == [release_before]
+        store_after.close()
+
+    asyncio.run(scenario())
+
+
+def test_release_intent_rejects_generation_drift_after_first_commit() -> None:
+    async def scenario() -> None:
+        store = InMemoryStore()
+        _runtime, _session, run = runtime_with_run(store)
+        client = RecordingComputeClient(store)
+        router = ExecutionProfileRouter(store=store, compute_client=client)
+        created = await router.dispatch(
+            run.run_id,
+            profile=profile(
+                "gpu-workload",
+                {"mode": "required", "class": "h100-80g", "quota": 1},
+            ),
+            compute_pool_id="pool-a",
+            image=IMAGE,
+            command=["python", "-m", "train"],
+        )
+        assert created is not None
+        await router.release(run.run_id, allocation=created)
+        changed = copy.deepcopy(created)
+        changed["generation"] = 2
+        with pytest.raises(ComputeProfileConflict, match="immutable"):
+            await router.release(run.run_id, allocation=changed)
+        assert len(client.release_requests) == 1
+        assert store.get_run(run.run_id).compute_release_request["expectedGeneration"] == 1
 
     asyncio.run(scenario())
