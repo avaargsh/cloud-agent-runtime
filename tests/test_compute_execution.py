@@ -233,6 +233,7 @@ def test_gpu_request_and_idempotency_key_survive_sqlite_runtime_restart(tmp_path
             command=["python", "-m", "train"],
         )
         first_request = copy.deepcopy(store_before.get_run(run.run_id).compute_request)
+        first_binding = copy.deepcopy(store_before.get_run(run.run_id).compute_binding)
         assert first is not None and first_request is not None
         store_before.close()
 
@@ -241,7 +242,6 @@ def test_gpu_request_and_idempotency_key_survive_sqlite_runtime_restart(tmp_path
         assert persisted_run.run_id == run.run_id
         assert persisted_run.session_id == session.session_id
         assert persisted_run.compute_request == first_request
-        first_binding = copy.deepcopy(store_before.get_run(run.run_id).compute_binding)
         assert first_binding == route_binding()
         assert persisted_run.compute_binding == first_binding
 
@@ -330,11 +330,6 @@ def test_compute_allocation_identity_mismatch_fails_closed() -> None:
 
 
 class CommitThenLoseAckClient(StaticBindingClient):
-    def __init__(self) -> None:
-        self.committed: dict[str, dict[str, Any]] = {}
-        self.calls: list[dict[str, Any]] = []
-        self.lose_first_ack = True
-
     def __init__(self) -> None:
         super().__init__()
         self.committed: dict[str, dict[str, Any]] = {}
