@@ -557,12 +557,21 @@ class AgentRuntime:
             save_intent = getattr(self.store, "save_allocation_intent", None)
             delete_intent = getattr(self.store, "delete_allocation_intent", None)
             list_intents = getattr(self.store, "list_allocation_intents", None)
-            if (
-                callable(allocate_with_id)
-                and callable(save_intent)
-                and callable(delete_intent)
-                and callable(list_intents)
-            ):
+            if callable(allocate_with_id):
+                if not all((
+                    callable(save_intent),
+                    callable(delete_intent),
+                    callable(list_intents),
+                )):
+                    # Do not silently fall back to an untracked allocate() call
+                    # when the provider supports durable, caller-assigned IDs.
+                    # The absence of intent persistence would reintroduce the
+                    # pre-bind orphan that this path is intended to prevent.
+                    raise RuntimeError(
+                        "RuntimeStore must support durable Sandbox allocation "
+                        "intents when the SandboxProvider supports allocate_with_id"
+                    )
+
                 # Assign the Sandbox ID and durably record its owner before the
                 # first Kubernetes side effect can create a Namespace.
                 sandbox_id = f"agent-sandbox-{uuid4().hex[:12]}"
