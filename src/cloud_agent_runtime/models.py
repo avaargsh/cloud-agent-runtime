@@ -80,3 +80,5 @@ class Run:
     compute_request: dict[str, Any] | None = None
     # Trusted Pool -> Cluster/Provider route frozen with compute_request on first commit.
     compute_binding: dict[str, Any] | None = None
+    # Distinct immutable release intent; never reuse the create requestId for DELETE.
+    compute_release_request: dict[str, Any] | None = None
