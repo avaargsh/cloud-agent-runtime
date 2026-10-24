@@ -4,7 +4,8 @@ from copy import deepcopy
 import json
 import sqlite3
 from pathlib import Path
-from typing import Protocol
+from threading import RLock
+from typing import Any, Protocol
 
 from .models import Run, Session
 from .serialization import (
@@ -27,12 +28,38 @@ class RuntimeStore(Protocol):
 
     def get_run(self, run_id: str) -> Run:
         ...
+    def persist_compute_request(
+        self,
+        run_id: str,
+        candidate: dict[str, Any],
+        binding: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Atomically persist request intent and its first trusted route binding."""
+        ...
+
+
+def _same_compute_intent(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    # requestId and intentDigest are generated from the first committed intent.
+    # Racing retries may build different candidates; compare the logical intent
+    # and always return the first stored request/idempotency key.
+    left_intent = {
+        key: value for key, value in left.items()
+        if key not in {"requestId", "intentDigest"}
+    }
+    right_intent = {
+        key: value for key, value in right.items()
+        if key not in {"requestId", "intentDigest"}
+    }
+    return left_intent == right_intent
+
+
 
 
 class InMemoryStore:
     def __init__(self) -> None:
         self.sessions: dict[str, Session] = {}
         self.runs: dict[str, Run] = {}
+        self._lock = RLock()
 
     def save_session(self, session: Session) -> None:
         existing = self.sessions.get(session.session_id)
@@ -54,18 +81,53 @@ class InMemoryStore:
             raise KeyError(f"unknown session: {session_id}") from exc
 
     def save_run(self, run: Run) -> None:
-        existing = self.runs.get(run.run_id)
-        if existing is not None and existing.session_id != run.session_id:
-            raise ValueError(
-                "run identity is immutable: session_id must match the existing run"
-            )
-        self.runs[run.run_id] = deepcopy(run)
+        with self._lock:
+            existing = self.runs.get(run.run_id)
+            if existing is not None and existing.session_id != run.session_id:
+                raise ValueError(
+                    "run identity is immutable: session_id must match the existing run"
+                )
+            if existing is not None and (
+                existing.compute_request != run.compute_request
+                or existing.compute_binding != run.compute_binding
+            ):
+                raise ValueError(
+                    "compute request and route binding can only be initialized through atomic persistence"
+                )
+            self.runs[run.run_id] = deepcopy(run)
 
     def get_run(self, run_id: str) -> Run:
-        try:
-            return deepcopy(self.runs[run_id])
-        except KeyError as exc:
-            raise KeyError(f"unknown run: {run_id}") from exc
+        with self._lock:
+            try:
+                return deepcopy(self.runs[run_id])
+            except KeyError as exc:
+                raise KeyError(f"unknown run: {run_id}") from exc
+
+    def persist_compute_request(
+        self,
+        run_id: str,
+        candidate: dict[str, Any],
+        binding: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        with self._lock:
+            try:
+                run = deepcopy(self.runs[run_id])
+            except KeyError as exc:
+                raise KeyError(f"unknown run: {run_id}") from exc
+            if run.compute_request is not None:
+                if not _same_compute_intent(run.compute_request, candidate):
+                    raise ValueError("compute request intent is immutable for a Run")
+                if run.compute_binding is None:
+                    raise ValueError("persisted ComputeRequest has no authoritative route binding")
+                # The first binding wins. A retry/resolver result must never
+                # reroute this operation to another Cluster after an ambiguity.
+                return deepcopy(run.compute_request), deepcopy(run.compute_binding)
+            if run.compute_binding is not None:
+                raise ValueError("Run has an orphaned compute route binding without a request")
+            run.compute_request = deepcopy(candidate)
+            run.compute_binding = deepcopy(binding)
+            self.runs[run_id] = run
+            return deepcopy(run.compute_request), deepcopy(run.compute_binding)
 
 
 class SQLiteStore:
@@ -160,6 +222,13 @@ class SQLiteStore:
                         "run identity is immutable: session_id must match "
                         "the existing run"
                     )
+                if (
+                    existing.compute_request != run.compute_request
+                    or existing.compute_binding != run.compute_binding
+                ):
+                    raise ValueError(
+                        "compute request and route binding can only be initialized through atomic persistence"
+                    )
             self._connection.execute(
                 """
                 INSERT INTO runs(run_id, payload)
@@ -180,6 +249,44 @@ class SQLiteStore:
             raise KeyError(f"unknown run: {run_id}")
 
         return run_from_dict(json.loads(row[0]))
+
+    def persist_compute_request(
+        self,
+        run_id: str,
+        candidate: dict[str, Any],
+        binding: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        # Request ID and first trusted Pool -> Cluster binding are committed in
+        # the same write lock/transaction before the public Management side effect.
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            row = self._connection.execute(
+                "SELECT payload FROM runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown run: {run_id}")
+            run = run_from_dict(json.loads(row[0]))
+            if run.compute_request is not None:
+                if not _same_compute_intent(run.compute_request, candidate):
+                    raise ValueError("compute request intent is immutable for a Run")
+                if run.compute_binding is None:
+                    raise ValueError("persisted ComputeRequest has no authoritative route binding")
+                return deepcopy(run.compute_request), deepcopy(run.compute_binding)
+            if run.compute_binding is not None:
+                raise ValueError("Run has an orphaned compute route binding without a request")
+            run.compute_request = deepcopy(candidate)
+            run.compute_binding = deepcopy(binding)
+            payload = json.dumps(
+                run_to_dict(run),
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            self._connection.execute(
+                "UPDATE runs SET payload = ? WHERE run_id = ?",
+                (payload, run_id),
+            )
+            return deepcopy(run.compute_request), deepcopy(run.compute_binding)
 
     def close(self) -> None:
         self._connection.close()
