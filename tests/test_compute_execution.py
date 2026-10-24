@@ -864,3 +864,36 @@ def test_stale_allocation_generation_does_not_poison_release_intent() -> None:
         assert client.release_requests == []
 
     asyncio.run(scenario())
+
+
+
+def test_concurrent_first_release_uses_one_persisted_release_key() -> None:
+    async def scenario() -> None:
+        store = InMemoryStore()
+        _runtime, _session, run = runtime_with_run(store)
+        client = RecordingComputeClient(store)
+        router = ExecutionProfileRouter(store=store, compute_client=client)
+        created = await router.dispatch(
+            run.run_id,
+            profile=profile(
+                "gpu-workload",
+                {"mode": "required", "class": "h100-80g", "quota": 1},
+            ),
+            compute_pool_id="pool-a",
+            image=IMAGE,
+            command=["python", "-m", "train"],
+        )
+        assert created is not None
+        results = await asyncio.gather(
+            router.release(run.run_id, allocation=created),
+            router.release(run.run_id, allocation=created),
+        )
+        stored = store.get_run(run.run_id).compute_release_request
+        assert stored is not None
+        assert len(client.release_requests) == 2
+        assert all(item == stored for item in client.release_requests)
+        assert client.release_requests[0]["requestId"] != created["requestId"]
+        assert all(result["requestId"] == created["requestId"] for result in results)
+        assert all(result["state"] == "RELEASING" for result in results)
+
+    asyncio.run(scenario())
