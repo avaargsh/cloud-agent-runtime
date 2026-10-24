@@ -15,6 +15,22 @@ from hpack import Decoder
 from temporalio.api.enums.v1 import EventType
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.testing import WorkflowEnvironment
+
+
+async def _start_cached_time_skipping():
+    """Reuse the Temporal test-server executable and retry transient rate limits."""
+    download_dir = Path.home() / ".cache" / "temporal-test-server"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    for attempt in range(4):
+        try:
+            return await WorkflowEnvironment.start_time_skipping(
+                download_dest_dir=str(download_dir)
+            )
+        except RuntimeError as exc:
+            if "429 Too Many Requests" not in str(exc) or attempt == 3:
+                raise
+            await asyncio.sleep(2 ** attempt)
+    raise AssertionError("unreachable Temporal test-server retry state")
 from temporalio.worker import Worker
 
 from cloud_agent_runtime.temporal_workflow import AgentRunWorkflow
@@ -250,7 +266,7 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
         workflow_id = f"agent-run-{run_id}"
         operation_id = f"agent-run-start:{run_id}"
 
-        async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with await _start_cached_time_skipping() as env:
             async with Worker(
                 env.client,
                 task_queue=task_queue,
