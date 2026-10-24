@@ -39,14 +39,55 @@ def profile(environment: str, accelerator: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-class RecordingComputeClient:
+def route_binding(
+    project_id: str = "project-a",
+    pool_id: str = "pool-a",
+    *,
+    cluster_id: str = "cluster-a",
+    provider: str = "kueue",
+    generation: int = 1,
+) -> dict[str, Any]:
+    return {
+        "projectId": project_id,
+        "computePoolId": pool_id,
+        "clusterId": cluster_id,
+        "provider": provider,
+        "providerBindingGeneration": generation,
+    }
+
+
+class StaticBindingClient:
+    async def resolve_binding(
+        self,
+        *,
+        project_id: str,
+        compute_pool_id: str,
+    ) -> dict[str, Any]:
+        return route_binding(project_id, compute_pool_id)
+
+
+class RecordingComputeClient(StaticBindingClient):
     def __init__(self, store: Any | None = None) -> None:
         self.store = store
         self.requests: list[dict[str, Any]] = []
+        self.bindings: list[dict[str, Any]] = []
+        self.binding_resolution_count = 0
+
+    async def resolve_binding(
+        self,
+        *,
+        project_id: str,
+        compute_pool_id: str,
+    ) -> dict[str, Any]:
+        self.binding_resolution_count += 1
+        await asyncio.sleep(0)
+        return route_binding(project_id, compute_pool_id)
 
     async def submit_or_reconcile(
         self,
         request: dict[str, Any],
+        *,
+        binding: dict[str, Any],
     ) -> dict[str, Any]:
         # The operation intent must be durably stored before the first
         # Control Plane side effect. This is deliberately observable here.
@@ -54,19 +95,21 @@ class RecordingComputeClient:
             run = self.store.get_run(request["correlation"]["runId"])
             assert run.compute_request is not None
             assert run.compute_request["requestId"] == request["requestId"]
+            assert run.compute_binding == binding
         # Ensure concurrent router calls interleave after reading intent. Both
         # clients should observe the same atomically committed request ID.
         await asyncio.sleep(0)
         self.requests.append(copy.deepcopy(request))
+        self.bindings.append(copy.deepcopy(binding))
         return {
             "requestId": request["requestId"],
             "projectId": request["projectId"],
             "computePoolId": request["computePoolId"],
             "workloadId": request["workload"]["id"],
             "generation": 1,
-            "clusterId": "cluster-a",
-            "provider": "kueue",
-            "providerBindingGeneration": 1,
+            "clusterId": binding["clusterId"],
+            "provider": binding["provider"],
+            "providerBindingGeneration": binding["providerBindingGeneration"],
             "observedGeneration": 0,
             "state": "REQUESTED",
             "providerRefs": [],
@@ -198,6 +241,9 @@ def test_gpu_request_and_idempotency_key_survive_sqlite_runtime_restart(tmp_path
         assert persisted_run.run_id == run.run_id
         assert persisted_run.session_id == session.session_id
         assert persisted_run.compute_request == first_request
+        first_binding = copy.deepcopy(store_before.get_run(run.run_id).compute_binding)
+        assert first_binding == route_binding()
+        assert persisted_run.compute_binding == first_binding
 
         client_after = RecordingComputeClient(store_after)
         router_after = ExecutionProfileRouter(store=store_after, compute_client=client_after)
@@ -210,6 +256,7 @@ def test_gpu_request_and_idempotency_key_survive_sqlite_runtime_restart(tmp_path
         )
         assert client_after.requests == [first_request]
         assert client_after.requests[0]["requestId"] == first_request["requestId"]
+        assert client_after.bindings == [first_binding]
         store_after.close()
 
     asyncio.run(scenario())
@@ -251,8 +298,8 @@ def test_replaying_gpu_run_with_changed_intent_fails_closed() -> None:
 
 
 def test_compute_allocation_identity_mismatch_fails_closed() -> None:
-    class WrongClient:
-        async def submit_or_reconcile(self, request: dict[str, Any]) -> dict[str, Any]:
+    class WrongClient(StaticBindingClient):
+        async def submit_or_reconcile(self, request: dict[str, Any], *, binding: dict[str, Any]) -> dict[str, Any]:
             return {
                 "requestId": request["requestId"],
                 "projectId": "another-project",
@@ -282,17 +329,40 @@ def test_compute_allocation_identity_mismatch_fails_closed() -> None:
 
 
 
-class CommitThenLoseAckClient:
+class CommitThenLoseAckClient(StaticBindingClient):
     def __init__(self) -> None:
         self.committed: dict[str, dict[str, Any]] = {}
         self.calls: list[dict[str, Any]] = []
         self.lose_first_ack = True
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.committed: dict[str, dict[str, Any]] = {}
+        self.calls: list[dict[str, Any]] = []
+        self.bindings: list[dict[str, Any]] = []
+        self.lose_first_ack = True
+
+    async def resolve_binding(
+        self,
+        *,
+        project_id: str,
+        compute_pool_id: str,
+    ) -> dict[str, Any]:
+        self.binding_resolution_count += 1
+        return route_binding(
+            project_id,
+            compute_pool_id,
+            cluster_id="cluster-a" if self.binding_resolution_count == 1 else "cluster-b",
+        )
+
     async def submit_or_reconcile(
         self,
         request: dict[str, Any],
+        *,
+        binding: dict[str, Any],
     ) -> dict[str, Any]:
         self.calls.append(copy.deepcopy(request))
+        self.bindings.append(copy.deepcopy(binding))
         request_id = request["requestId"]
         if request_id not in self.committed:
             self.committed[request_id] = {
@@ -301,9 +371,9 @@ class CommitThenLoseAckClient:
                 "computePoolId": request["computePoolId"],
                 "workloadId": request["workload"]["id"],
                 "generation": 1,
-                "clusterId": "cluster-a",
-                "provider": "kueue",
-                "providerBindingGeneration": 1,
+                "clusterId": binding["clusterId"],
+                "provider": binding["provider"],
+                "providerBindingGeneration": binding["providerBindingGeneration"],
                 "observedGeneration": 0,
                 "state": "REQUESTED",
                 "providerRefs": [],
@@ -351,6 +421,11 @@ def test_lost_ack_retries_the_persisted_request_id() -> None:
         assert len(client.calls) == 2
         assert client.calls[0] == client.calls[1] == persisted
         assert recovered["requestId"] == persisted["requestId"]
+        # The Pool resolver would return cluster-b on a second lookup; the
+        # retry must use the original persisted route instead.
+        assert client.binding_resolution_count == 1
+        assert client.bindings == [route_binding(), route_binding()]
+        assert store.get_run(run.run_id).compute_binding == route_binding()
 
     asyncio.run(scenario())
 
@@ -411,18 +486,20 @@ def test_stale_run_save_cannot_erase_compute_request_intent() -> None:
         )
         before = store.get_run(run.run_id).compute_request
 
+        before_binding = copy.deepcopy(store.get_run(run.run_id).compute_binding)
         with pytest.raises(ValueError, match="atomic persistence"):
-            store.save_run(run)  # stale snapshot lacks the committed compute intent
+            store.save_run(run)  # stale snapshot lacks the committed request and binding
 
         assert store.get_run(run.run_id).compute_request == before
+        assert store.get_run(run.run_id).compute_binding == before_binding
 
     asyncio.run(scenario())
 
 
 
 def test_allocation_rejects_stale_observation_generation() -> None:
-    class StaleClient:
-        async def submit_or_reconcile(self, request: dict[str, Any]) -> dict[str, Any]:
+    class StaleClient(StaticBindingClient):
+        async def submit_or_reconcile(self, request: dict[str, Any], *, binding: dict[str, Any]) -> dict[str, Any]:
             return {
                 "requestId": request["requestId"],
                 "projectId": request["projectId"],
@@ -468,8 +545,8 @@ def test_allocation_rejects_stale_observation_generation() -> None:
 
 
 def test_allocation_requires_image_bound_provider_ownership_proof() -> None:
-    class ForeignImageClient:
-        async def submit_or_reconcile(self, request: dict[str, Any]) -> dict[str, Any]:
+    class ForeignImageClient(StaticBindingClient):
+        async def submit_or_reconcile(self, request: dict[str, Any], *, binding: dict[str, Any]) -> dict[str, Any]:
             return {
                 "requestId": request["requestId"],
                 "projectId": request["projectId"],
@@ -515,8 +592,8 @@ def test_allocation_requires_image_bound_provider_ownership_proof() -> None:
 
 
 def test_release_cannot_be_claimed_with_provider_refs_remaining() -> None:
-    class IncompleteCleanupClient:
-        async def submit_or_reconcile(self, request: dict[str, Any]) -> dict[str, Any]:
+    class IncompleteCleanupClient(StaticBindingClient):
+        async def submit_or_reconcile(self, request: dict[str, Any], *, binding: dict[str, Any]) -> dict[str, Any]:
             return {
                 "requestId": request["requestId"],
                 "projectId": request["projectId"],
