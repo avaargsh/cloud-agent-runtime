@@ -352,10 +352,11 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
                     )
                     recovered = json.loads(recovered_line.decode())
                     # Keep the restarted process alive as a real long-lived
-                    # runtime would. Temporal's Python SDK has an open report
-                    # for crashes when a client-only process exits immediately
-                    # after an RPC; that shutdown path is not this recovery
-                    # invariant and must not hide a failed reconciliation.
+                    # runtime would. The Temporal Python SDK has an upstream
+                    # report about Python finalization failures in short-lived
+                    # client-only programs: https://github.com/temporalio/sdk-python/issues/300
+                    # This fault test verifies recovery while the runtime lives;
+                    # explicit shutdown is a separate lifecycle test.
                     await asyncio.sleep(0.2)
                     assert reconcile.returncode is None, (
                         "recovery process exited after reporting attachment; "
@@ -367,6 +368,29 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
                     temporal_execution_run_id = getattr(description, "run_id", None)
                     assert isinstance(temporal_execution_run_id, str) and temporal_execution_run_id
                     assert recovered["workflow_ref"]["run_id"] == temporal_execution_run_id
+
+                    # Independently reopen the durable store from the parent
+                    # process. A correct child-process object is not sufficient:
+                    # the canonical Run and concrete Temporal execution reference
+                    # must have been committed to SQLite for the next restart.
+                    with sqlite3.connect(db_path) as connection:
+                        recovered_rows = connection.execute(
+                            "SELECT run_id, payload FROM runs"
+                        ).fetchall()
+                    assert len(recovered_rows) == 1, (
+                        f"expected exactly one persisted canonical Run after recovery; "
+                        f"got {len(recovered_rows)}"
+                    )
+                    recovered_store_run_id, recovered_payload_text = recovered_rows[0]
+                    persisted_recovered = json.loads(recovered_payload_text)
+                    persisted_workflow_ref = persisted_recovered.get("workflow_ref") or {}
+                    assert recovered_store_run_id == run_id
+                    assert persisted_recovered["run_id"] == run_id
+                    assert persisted_recovered["session_id"] == persisted["session_id"]
+                    assert persisted_recovered["recovery_operation_id"] == operation_id
+                    assert persisted_recovered["recovery_state"] == "attached"
+                    assert persisted_workflow_ref.get("workflow_id") == workflow_id
+                    assert persisted_workflow_ref.get("run_id") == temporal_execution_run_id
                     history = await handle.fetch_history()
                     events = list(getattr(history, "events", []))
                     if not events and getattr(history, "history", None) is not None:
