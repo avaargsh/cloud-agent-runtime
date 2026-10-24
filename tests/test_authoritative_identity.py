@@ -314,11 +314,13 @@ def test_revocation_contract_requires_valid_acknowledgements():
     }
     assert broker.revoke_credential("cred-001") is True
     assert broker.revoke_run("run-a", sandbox_revision=3) == 2
-    assert transport.calls[1] == (
+    assert transport.calls[1][0:2] == (
         "POST",
         "/v1/workload-credentials:revoke-run",
-        {"run_id": "run-a", "sandbox_revision": 3},
     )
+    assert transport.calls[1][2]["run_id"] == "run-a"
+    assert transport.calls[1][2]["sandbox_revision"] == 3
+    assert transport.calls[1][2]["event_id"]
     assert broker.revoke_approval("approval-a") == 1
     transport.responses[("POST", "/v1/workload-credentials:revoke-run")] = {
         "revoked_count": -1
