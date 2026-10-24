@@ -4,7 +4,8 @@ from copy import deepcopy
 import json
 import sqlite3
 from pathlib import Path
-from typing import Protocol
+from threading import RLock
+from typing import Any, Protocol
 
 from .models import Run, Session
 from .serialization import (
@@ -27,12 +28,31 @@ class RuntimeStore(Protocol):
 
     def get_run(self, run_id: str) -> Run:
         ...
+    def persist_compute_request(
+        self,
+        run_id: str,
+        candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Atomically persist one immutable request intent before side effects."""
+        ...
+
+
+def _same_compute_intent(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    # requestId and intentDigest are generated from the first committed intent.
+    # Racing retries may build different candidates; compare the logical intent
+    # and always return the first stored request/idempotency key.
+    left_intent = {key: value for key, value in left.items() if key not in {"requestId", "intentDigest"}}
+    right_intent = {key: value for key, value in right.items() if key not in {"requestId", "intentDigest"}}
+    return left_intent == right_intent
+
+
 
 
 class InMemoryStore:
     def __init__(self) -> None:
         self.sessions: dict[str, Session] = {}
         self.runs: dict[str, Run] = {}
+        self._lock = RLock()
 
     def save_session(self, session: Session) -> None:
         existing = self.sessions.get(session.session_id)
@@ -54,18 +74,38 @@ class InMemoryStore:
             raise KeyError(f"unknown session: {session_id}") from exc
 
     def save_run(self, run: Run) -> None:
-        existing = self.runs.get(run.run_id)
-        if existing is not None and existing.session_id != run.session_id:
-            raise ValueError(
-                "run identity is immutable: session_id must match the existing run"
-            )
-        self.runs[run.run_id] = deepcopy(run)
+        with self._lock:
+            existing = self.runs.get(run.run_id)
+            if existing is not None and existing.session_id != run.session_id:
+                raise ValueError(
+                    "run identity is immutable: session_id must match the existing run"
+                )
+            self.runs[run.run_id] = deepcopy(run)
 
     def get_run(self, run_id: str) -> Run:
-        try:
-            return deepcopy(self.runs[run_id])
-        except KeyError as exc:
-            raise KeyError(f"unknown run: {run_id}") from exc
+        with self._lock:
+            try:
+                return deepcopy(self.runs[run_id])
+            except KeyError as exc:
+                raise KeyError(f"unknown run: {run_id}") from exc
+
+    def persist_compute_request(
+        self,
+        run_id: str,
+        candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        with self._lock:
+            try:
+                run = deepcopy(self.runs[run_id])
+            except KeyError as exc:
+                raise KeyError(f"unknown run: {run_id}") from exc
+            if run.compute_request is not None:
+                if not _same_compute_intent(run.compute_request, candidate):
+                    raise ValueError("compute request intent is immutable for a Run")
+                return deepcopy(run.compute_request)
+            run.compute_request = deepcopy(candidate)
+            self.runs[run_id] = run
+            return deepcopy(run.compute_request)
 
 
 class SQLiteStore:
@@ -180,6 +220,39 @@ class SQLiteStore:
             raise KeyError(f"unknown run: {run_id}")
 
         return run_from_dict(json.loads(row[0]))
+
+    def persist_compute_request(
+        self,
+        run_id: str,
+        candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        # Read/compare/write within one serialized DB transaction. If multiple
+        # workers race to prepare a first request, the winner's 128-bit key is
+        # returned to every retry before anyone can call the Control Plane.
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            row = self._connection.execute(
+                "SELECT payload FROM runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown run: {run_id}")
+            run = run_from_dict(json.loads(row[0]))
+            if run.compute_request is not None:
+                if not _same_compute_intent(run.compute_request, candidate):
+                    raise ValueError("compute request intent is immutable for a Run")
+                return deepcopy(run.compute_request)
+            run.compute_request = deepcopy(candidate)
+            payload = json.dumps(
+                run_to_dict(run),
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            self._connection.execute(
+                "UPDATE runs SET payload = ? WHERE run_id = ?",
+                (payload, run_id),
+            )
+            return deepcopy(run.compute_request)
 
     def close(self) -> None:
         self._connection.close()
