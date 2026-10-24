@@ -12,6 +12,7 @@ from .contracts import (
     CapabilityBinding,
     EvidenceRef,
 )
+from .event_inbox import EventConflictError, EventEnvelope, SQLiteEventInbox
 from .evidence_archive import ArchivedEvidence, EvidenceArchive
 from .evidence_collector import (
     AppendOnlyEvidenceCollector,
@@ -65,6 +66,9 @@ __all__ = [
     "AsyncWorkflowDriver",
     "Budget",
     "CapabilityBinding",
+    "EventConflictError",
+    "EventEnvelope",
+    "SQLiteEventInbox",
     "EvidenceArchive",
     "EvidenceEvent",
     "EvidenceIntegrityError",
