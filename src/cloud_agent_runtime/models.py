@@ -78,3 +78,5 @@ class Run:
     # Immutable ComputeRequest intent, persisted before any Control Plane side effect.
     # ComputeAllocation remains a live Control Plane projection, not Run-owned state.
     compute_request: dict[str, Any] | None = None
+    # Trusted Pool -> Cluster/Provider route frozen with compute_request on first commit.
+    compute_binding: dict[str, Any] | None = None
