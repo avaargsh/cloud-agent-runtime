@@ -166,3 +166,83 @@ def test_bridge_reference_reads_terminal_run_without_start_or_attach() -> None:
 
     asyncio.run(scenario())
 
+
+def test_bridge_complete_rejects_non_successful_terminal_run() -> None:
+    import pytest
+
+    from cloud_agent_runtime.temporal_driver import TemporalWorkflowConflict
+
+    async def scenario(phase: str) -> None:
+        client = FakeClient()
+        client.handle.state.update({"phase": phase, "terminal": True})
+        bridge = TemporalRunBridge(
+            TemporalWorkflowDriver(client=client, task_queue="agent-runs")
+        )
+        ref = bridge.reference(runtime_run_id="run-1")
+
+        with pytest.raises(
+            TemporalWorkflowConflict,
+            match=f"terminal phase={phase}",
+        ):
+            await bridge.complete(ref)
+
+        assert client.handle.signals == []
+
+    for phase in ("failed", "cancelled", "unknown"):
+        asyncio.run(scenario(phase))
+
+
+def test_bridge_complete_rejects_failed_close_race() -> None:
+    import pytest
+
+    from cloud_agent_runtime.temporal_driver import TemporalWorkflowConflict
+
+    class RacingHandle(FakeHandle):
+        async def signal(self, name, payload):
+            self.state.update({"phase": "cancelled", "terminal": True})
+            raise RuntimeError("workflow execution already closed")
+
+    async def scenario():
+        client = FakeClient()
+        client.handle = RacingHandle()
+        bridge = TemporalRunBridge(
+            TemporalWorkflowDriver(client=client, task_queue="agent-runs")
+        )
+        ref = bridge.reference(runtime_run_id="run-1")
+
+        with pytest.raises(
+            TemporalWorkflowConflict,
+            match="terminal phase=cancelled",
+        ):
+            await bridge.complete(ref)
+
+    asyncio.run(scenario())
+
+
+def test_bridge_complete_rejects_failed_state_after_signal_ack() -> None:
+    import pytest
+
+    from cloud_agent_runtime.temporal_driver import TemporalWorkflowConflict
+
+    class FailedAfterSignalHandle(FakeHandle):
+        async def signal(self, name, payload):
+            self.signals.append((name, payload))
+            self.state.update({"phase": "failed", "terminal": True})
+
+    async def scenario():
+        client = FakeClient()
+        client.handle = FailedAfterSignalHandle()
+        bridge = TemporalRunBridge(
+            TemporalWorkflowDriver(client=client, task_queue="agent-runs")
+        )
+        ref = bridge.reference(runtime_run_id="run-1")
+
+        with pytest.raises(
+            TemporalWorkflowConflict,
+            match="terminal phase=failed",
+        ):
+            await bridge.complete(ref)
+
+        assert len(client.handle.signals) == 1
+
+    asyncio.run(scenario())
