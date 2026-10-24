@@ -355,3 +355,100 @@ def test_reconcile_keeps_cleanup_intent_until_persisted_sandbox_binding_matches(
     assert provider.is_gone(sandbox_id) is True
     assert store.list_allocation_intents() == []
     store.close()
+
+
+
+def test_run_commit_ack_loss_preserves_canonically_bound_sandbox(tmp_path):
+    class CommitThenRaiseStore:
+        """Simulate durable save with a lost/failed caller acknowledgement."""
+
+        def __init__(self, path):
+            self.inner = SQLiteStore(path)
+            self.raise_after_commit = True
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def save_run(self, run):
+            self.inner.save_run(run)
+            if self.raise_after_commit:
+                self.raise_after_commit = False
+                raise OSError("simulated lost acknowledgement after durable commit")
+
+    kubectl = FakeKubectl()
+    provider = KubernetesSandboxProvider(kubectl=kubectl)
+    store = CommitThenRaiseStore(tmp_path / "run-save-ack-loss.db")
+    runtime = AgentRuntime(store=store, sandbox_provider=provider)
+    session = runtime.create_session(
+        agent_id="coding-agent",
+        release_id="coding-agent-v1",
+        tenant_id="tenant-a",
+    )
+
+    run = runtime.start_run(session_id=session.session_id)
+
+    # The authoritative read confirms that the failed save acknowledgement
+    # followed a committed canonical binding. The Run must retain the exact
+    # Sandbox instead of deleting it in the exception handler.
+    assert store.get_run(run.run_id).sandbox_binding is not None
+    binding = store.get_run(run.run_id).sandbox_binding
+    assert binding is not None
+    namespace = provider._namespace_for(binding.sandbox_id)
+    assert namespace in kubectl.namespaces
+    assert provider.is_gone(binding.sandbox_id) is False
+    assert store.list_allocation_intents() == []
+    assert runtime._sandboxes[run.run_id].sandbox_id == binding.sandbox_id
+    store.close()
+
+
+def test_run_save_ack_loss_with_unavailable_read_keeps_cleanup_intent(tmp_path):
+    class CommitThenRaiseReadUnavailableStore:
+        """A save acknowledgement and its follow-up read are both ambiguous."""
+
+        def __init__(self, path):
+            self.inner = SQLiteStore(path)
+            self.raise_after_commit = True
+            self.fail_reads = False
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def save_run(self, run):
+            self.inner.save_run(run)
+            if self.raise_after_commit:
+                self.raise_after_commit = False
+                self.fail_reads = True
+                raise OSError("simulated lost acknowledgement after durable commit")
+
+        def get_run(self, run_id):
+            if self.fail_reads:
+                raise OSError("simulated unavailable canonical read")
+            return self.inner.get_run(run_id)
+
+    kubectl = FakeKubectl()
+    provider = KubernetesSandboxProvider(kubectl=kubectl)
+    store = CommitThenRaiseReadUnavailableStore(tmp_path / "run-save-ack-loss-unknown.db")
+    runtime = AgentRuntime(store=store, sandbox_provider=provider)
+    session = runtime.create_session(
+        agent_id="coding-agent",
+        release_id="coding-agent-v1",
+        tenant_id="tenant-a",
+    )
+
+    with pytest.raises(OSError, match="lost acknowledgement"):
+        runtime.start_run(session_id=session.session_id)
+
+    intents = store.list_allocation_intents()
+    assert len(intents) == 1
+    intent = intents[0]
+    assert intent.state == "cleanup_pending"
+    namespace = provider._namespace_for(intent.sandbox_id)
+    # Do not destroy a possibly committed Run's workspace merely because the
+    # follow-up authority read is unavailable. Durable recovery decides later.
+    assert namespace in kubectl.namespaces
+    assert provider.is_gone(intent.sandbox_id) is False
+    store.fail_reads = False
+    runtime.reconcile_sandbox_allocation_intents()
+    assert store.list_allocation_intents() == []
+    assert namespace in kubectl.namespaces
+    store.close()
