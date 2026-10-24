@@ -105,12 +105,8 @@ class EventRetryCoordinator:
             # A failed Query can happen before or after a Signal was accepted.
             # An unknown failure is bounded, never considered delivered.
             reason = "transport_unknown"
-
-        if not blocked and reason == "transport_unknown" and confirmed == 1:
-            # No exception; a committed receipt removed the retry schedule.
-            return RetryOutcome("confirmed", event.event_id)
-
-        if not blocked and reason != "transport_unknown" and confirmed == 1:
+        else:
+            # A committed receipt also clears the retry schedule transactionally.
             return RetryOutcome("confirmed", event.event_id)
 
         attempt = (previous.attempts if previous else 0) + 1
