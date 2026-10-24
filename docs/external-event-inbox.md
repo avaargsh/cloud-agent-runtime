@@ -93,3 +93,25 @@ event ingress, restrictive Temporal network credentials/TLS, multiple
 dispatchers with concurrency control, recovery polling with backoff, a real
 persisted-server restart/replay and external audit retention. The SQLite local
 reference store is not the production multi-tenant event service.
+
+
+## Slice 3: bounded single-flight dispatch on one SQLite database
+
+Multiple caller-driven dispatchers may now share the **same local SQLite database**.
+Each unacknowledged event is atomically claimed with `BEGIN IMMEDIATE`, a unique
+owner token and a default **60-second** lease before any Temporal query/Signal.
+Competing live dispatchers skip the claimed event; only its current, unexpired
+owner can commit a server-observed receipt. A stale owner cannot delete its
+replacement's claim. Normal completion or caught errors release the claim.
+After process death, the database lease expires and another invocation can
+reconcile Temporal's observed event before considering a re-Signal.
+
+This is **at-least-once transport, idempotent Workflow recording**, not exactly-once
+Signal delivery. A driver request delayed beyond the lease can overlap a
+replacement and may issue a duplicate Signal; its stale receipt is rejected.
+The reference adapter has **no daemon, retry timer, automatic backoff, lease
+renewal or database-distributed security boundary**. Operators must bound
+driver RPC times below the configured lease and re-invoke after failures. Only
+use this implementation for the local SQLite reference setup; production
+deployments still need authorized persistent retry coordination, telemetry,
+bounded RPC deadlines, provider credentials and a retained-history policy.
