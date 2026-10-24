@@ -250,7 +250,8 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
         workflow_id = f"agent-run-{run_id}"
         operation_id = f"agent-run-start:{run_id}"
 
-        async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with await WorkflowEnvironment.start_local() as env:
+            assert not env.supports_time_skipping, "ACK-drop replay must run against the full local Temporal server"
             async with Worker(
                 env.client,
                 task_queue=task_queue,
