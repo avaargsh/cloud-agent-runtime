@@ -22,6 +22,10 @@ jobs:
       AGENTOS_POLICY_DIGEST: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Pull-request acceptance must execute the advertised PR HEAD, not
+          # GitHub's synthetic refs/pull/<n>/merge commit.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
