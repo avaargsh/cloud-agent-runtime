@@ -14,7 +14,6 @@ from .contracts import (
 )
 from .event_inbox import EventConflictError, EventEnvelope, SQLiteEventInbox
 from .event_delivery import EventDeliveryUncertain, TemporalEventDispatcher
-from .event_retry import EventRetryCoordinator, RetryOutcome
 from .evidence_archive import ArchivedEvidence, EvidenceArchive
 from .evidence_collector import (
     AppendOnlyEvidenceCollector,
@@ -71,7 +70,6 @@ __all__ = [
     "EventConflictError",
     "EventEnvelope",
     "EventDeliveryUncertain",
-    "EventRetryCoordinator",
     "SQLiteEventInbox",
     "EvidenceArchive",
     "EvidenceEvent",
@@ -93,7 +91,6 @@ __all__ = [
     "OTelSpanSnapshot",
     "Provenance",
     "RetryableToolError",
-    "RetryOutcome",
     "Run",
     "RunStatus",
     "SandboxBinding",

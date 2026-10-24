@@ -132,9 +132,9 @@ Use the same Inbox instance when constructing both adapters:
 
 ```python
 from cloud_agent_runtime import (
-    SQLiteEventInbox, TemporalWorkflowDriver,
-    TemporalEventDispatcher, EventRetryCoordinator,
+    SQLiteEventInbox, TemporalWorkflowDriver, TemporalEventDispatcher,
 )
+from cloud_agent_runtime.event_retry import EventRetryCoordinator
 
 inbox = SQLiteEventInbox("runtime.sqlite")
 driver = await TemporalWorkflowDriver.connect(
