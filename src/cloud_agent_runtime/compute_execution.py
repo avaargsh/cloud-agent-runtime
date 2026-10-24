@@ -170,6 +170,7 @@ def _build_request(
 def _validate_allocation(
     allocation: Mapping[str, Any],
     request: Mapping[str, Any],
+    binding: Mapping[str, Any],
 ) -> dict[str, Any]:
     expected = {
         "requestId": request["requestId"],
@@ -181,6 +182,11 @@ def _validate_allocation(
         if allocation.get(field) != value:
             raise RuntimeError(
                 f"Control Plane allocation identity mismatch for {field}; fail closed"
+            )
+    for field in ("clusterId", "provider", "providerBindingGeneration"):
+        if allocation.get(field) != binding.get(field):
+            raise RuntimeError(
+                f"Control Plane allocation route binding mismatch for {field}; fail closed"
             )
 
     generation = allocation.get("generation")
@@ -373,4 +379,4 @@ class ExecutionProfileRouter:
         )
         if not isinstance(allocation, Mapping):
             raise RuntimeError("Compute client returned a non-object allocation")
-        return _validate_allocation(allocation, request)
+        return _validate_allocation(allocation, request, binding)
