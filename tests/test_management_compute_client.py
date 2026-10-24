@@ -6,7 +6,6 @@ import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -263,7 +262,6 @@ def test_management_client_stops_after_unknown_commit_and_uses_same_key_on_retry
         server = LostReceiptServer(drop_first_put_ack=True)
         # Simulate temporary read outage after a committed write. The client
         # must return UNKNOWN and not mint/reissue another idempotency key.
-        original_receipt = server.receipt
         original = server.server.RequestHandlerClass.do_GET
 
         def get_with_temporary_outage(handler) -> None:
