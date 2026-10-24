@@ -52,6 +52,16 @@ class ComputeResourceClient(Protocol):
         ...
 
 
+    async def verify_release_target(
+        self,
+        *,
+        request: Mapping[str, Any],
+        binding: Mapping[str, Any],
+        expected_generation: int,
+    ) -> None:
+        """Verify the authorized current Desired Generation before release intent is persisted."""
+        ...
+
     async def release_or_reconcile(
         self,
         release_request: dict[str, Any],
@@ -364,6 +374,20 @@ class ExecutionProfileRouter:
             )
         expected_generation = validated["generation"]
         existing_release = run.compute_release_request
+        if existing_release is None:
+            verifier = getattr(self.compute_client, "verify_release_target", None)
+            if not callable(verifier):
+                raise TypeError(
+                    "Compute client must verify authoritative Desired Generation before persisting a new release intent"
+                )
+            # This is a read-only authority check. It prevents a stale or
+            # caller-forged Allocation generation from permanently pinning the
+            # Run to an invalid immutable release intent.
+            await verifier(
+                request=copy.deepcopy(request),
+                binding=copy.deepcopy(binding),
+                expected_generation=expected_generation,
+            )
         release_id = (
             existing_release.get("requestId")
             if isinstance(existing_release, Mapping)
