@@ -269,3 +269,134 @@ def test_compute_allocation_identity_mismatch_fails_closed() -> None:
             )
 
     asyncio.run(scenario())
+
+
+
+class CommitThenLoseAckClient:
+    def __init__(self) -> None:
+        self.committed: dict[str, dict[str, Any]] = {}
+        self.calls: list[dict[str, Any]] = []
+        self.lose_first_ack = True
+
+    async def submit_or_reconcile(
+        self,
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.calls.append(copy.deepcopy(request))
+        request_id = request["requestId"]
+        if request_id not in self.committed:
+            self.committed[request_id] = {
+                "requestId": request_id,
+                "projectId": request["projectId"],
+                "computePoolId": request["computePoolId"],
+                "workloadId": request["workload"]["id"],
+                "generation": 1,
+                "state": "REQUESTED",
+            }
+        if self.lose_first_ack:
+            self.lose_first_ack = False
+            raise ConnectionError("simulated response loss after durable Control Plane commit")
+        return copy.deepcopy(self.committed[request_id])
+
+
+def test_lost_ack_retries_the_persisted_request_id() -> None:
+    async def scenario() -> None:
+        store = InMemoryStore()
+        _runtime, _session, run = runtime_with_run(store)
+        client = CommitThenLoseAckClient()
+        router = ExecutionProfileRouter(store=store, compute_client=client)
+        gpu_profile = profile(
+            "gpu-workload",
+            {"mode": "required", "class": "h100-80g", "quota": 1},
+        )
+
+        with pytest.raises(ConnectionError, match="response loss"):
+            await router.dispatch(
+                run.run_id,
+                profile=gpu_profile,
+                compute_pool_id="pool-a",
+                image=IMAGE,
+                command=["python", "-m", "train"],
+            )
+        persisted = store.get_run(run.run_id).compute_request
+        assert persisted is not None
+
+        recovered = await router.dispatch(
+            run.run_id,
+            profile=gpu_profile,
+            compute_pool_id="pool-a",
+            image=IMAGE,
+            command=["python", "-m", "train"],
+        )
+
+        assert recovered is not None
+        assert len(client.committed) == 1
+        assert len(client.calls) == 2
+        assert client.calls[0] == client.calls[1] == persisted
+        assert recovered["requestId"] == persisted["requestId"]
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_gpu_dispatches_share_one_atomic_request_key() -> None:
+    async def scenario() -> None:
+        store = InMemoryStore()
+        _runtime, _session, run = runtime_with_run(store)
+        client = RecordingComputeClient(store)
+        router_a = ExecutionProfileRouter(store=store, compute_client=client)
+        router_b = ExecutionProfileRouter(store=store, compute_client=client)
+        gpu_profile = profile(
+            "gpu-workload",
+            {"mode": "required", "class": "h100-80g", "quota": 1},
+        )
+
+        first, second = await asyncio.gather(
+            router_a.dispatch(
+                run.run_id,
+                profile=gpu_profile,
+                compute_pool_id="pool-a",
+                image=IMAGE,
+                command=["python", "-m", "train"],
+            ),
+            router_b.dispatch(
+                run.run_id,
+                profile=gpu_profile,
+                compute_pool_id="pool-a",
+                image=IMAGE,
+                command=["python", "-m", "train"],
+            ),
+        )
+
+        assert first is not None and second is not None
+        assert len(client.requests) == 2  # at-least-once client calls are expected
+        assert client.requests[0] == client.requests[1]
+        assert client.requests[0]["requestId"] == store.get_run(run.run_id).compute_request["requestId"]
+
+    asyncio.run(scenario())
+
+
+def test_stale_run_save_cannot_erase_compute_request_intent() -> None:
+    async def scenario() -> None:
+        store = InMemoryStore()
+        _runtime, _session, run = runtime_with_run(store)
+        client = RecordingComputeClient(store)
+        router = ExecutionProfileRouter(store=store, compute_client=client)
+
+        await router.dispatch(
+            run.run_id,
+            profile=profile(
+                "gpu-workload",
+                {"mode": "required", "class": "h100-80g", "quota": 1},
+            ),
+            compute_pool_id="pool-a",
+            image=IMAGE,
+            command=["python", "-m", "train"],
+        )
+        before = store.get_run(run.run_id).compute_request
+
+        with pytest.raises(ValueError, match="atomic persistence"):
+            store.save_run(run)  # stale snapshot lacks the committed compute intent
+
+        assert store.get_run(run.run_id).compute_request == before
+
+    asyncio.run(scenario())
