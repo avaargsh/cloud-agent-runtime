@@ -80,6 +80,10 @@ class InMemoryStore:
                 raise ValueError(
                     "run identity is immutable: session_id must match the existing run"
                 )
+            if existing is not None and existing.compute_request != run.compute_request:
+                raise ValueError(
+                    "compute request intent can only be initialized through atomic persistence"
+                )
             self.runs[run.run_id] = deepcopy(run)
 
     def get_run(self, run_id: str) -> Run:
@@ -199,6 +203,10 @@ class SQLiteStore:
                     raise ValueError(
                         "run identity is immutable: session_id must match "
                         "the existing run"
+                    )
+                if existing.compute_request != run.compute_request:
+                    raise ValueError(
+                        "compute request intent can only be initialized through atomic persistence"
                     )
             self._connection.execute(
                 """
