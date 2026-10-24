@@ -387,8 +387,14 @@ class AgentRuntime:
         intent: SandboxAllocationIntent,
     ) -> None:
         """Retain cleanup ownership without replacing the primary failure."""
+        save_intent = getattr(self.store, "save_allocation_intent", None)
+        if not callable(save_intent):
+            # This helper is only reached after the intent-capable Provider
+            # contract was checked, but retain the original exception if a
+            # custom Store violates that contract during failure handling.
+            return
         try:
-            self.store.save_allocation_intent(SandboxAllocationIntent(
+            save_intent(SandboxAllocationIntent(
                 run_id=intent.run_id,
                 session_id=intent.session_id,
                 provider=intent.provider,

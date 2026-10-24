@@ -48,6 +48,15 @@ class RuntimeStore(Protocol):
     def get_run(self, run_id: str) -> Run:
         ...
 
+
+class SandboxAllocationIntentStore(Protocol):
+    """Optional durable-storage capability required by recoverable-ID providers.
+
+    Keeping this separate lets existing RuntimeStore implementations continue
+    to serve Providers that do not support caller-assigned recoverable IDs.
+    Runtime checks the capability before the Provider can create resources.
+    """
+
     def save_allocation_intent(self, intent: SandboxAllocationIntent) -> None:
         ...
 
