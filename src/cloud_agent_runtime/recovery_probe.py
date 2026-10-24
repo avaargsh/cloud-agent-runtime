@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import argparse
 import asyncio
 import json
@@ -131,7 +132,12 @@ async def _reconcile_sqlite(args) -> None:
             "run_id": run.workflow_ref.run_id,
         } if run.workflow_ref else None,
         "recovery_evidence": run.recovery_evidence,
-    }, sort_keys=True))
+    }, sort_keys=True), flush=True)
+    if args.hold_open_for_test:
+        # This subprocess represents the restarted long-lived runtime, not a
+        # one-shot Temporal client. Keep its SDK runtime active until the parent
+        # has checked the recovered state and explicitly tears down the probe.
+        await asyncio.Event().wait()
     store.close()
     close = getattr(driver.client, "close", None)
     if close:
@@ -316,7 +322,14 @@ def main() -> None:
     parser.add_argument("--temporal-address", default=os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"))
     parser.add_argument("--namespace", default=os.environ.get("TEMPORAL_NAMESPACE", "default"))
     parser.add_argument("--task-queue", default=os.environ.get("TEMPORAL_TASK_QUEUE", "agent-runs"))
+    parser.add_argument(
+        "--hold-open-for-test",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
+    if args.hold_open_for_test and args.command != "reconcile-sqlite":
+        parser.error("--hold-open-for-test is only valid for reconcile-sqlite")
 
     if args.command in {"start-intent", "reconcile"}:
         if not args.state_file:
