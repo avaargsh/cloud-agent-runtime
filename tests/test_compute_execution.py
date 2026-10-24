@@ -897,3 +897,68 @@ def test_concurrent_first_release_uses_one_persisted_release_key() -> None:
         assert all(result["state"] == "RELEASING" for result in results)
 
     asyncio.run(scenario())
+
+
+
+def test_stale_run_save_cannot_erase_compute_release_request_intent() -> None:
+    async def scenario() -> None:
+        store = InMemoryStore()
+        _runtime, _session, run = runtime_with_run(store)
+        client = RecordingComputeClient(store)
+        router = ExecutionProfileRouter(store=store, compute_client=client)
+        created = await router.dispatch(
+            run.run_id,
+            profile=profile(
+                "gpu-workload",
+                {"mode": "required", "class": "h100-80g", "quota": 1},
+            ),
+            compute_pool_id="pool-a",
+            image=IMAGE,
+            command=["python", "-m", "train"],
+        )
+        assert created is not None
+        stale = copy.deepcopy(store.get_run(run.run_id))
+        await router.release(run.run_id, allocation=created)
+        committed = copy.deepcopy(store.get_run(run.run_id).compute_release_request)
+        assert committed is not None
+
+        with pytest.raises(ValueError, match="create/release intents"):
+            store.save_run(stale)
+        assert store.get_run(run.run_id).compute_release_request == committed
+
+    asyncio.run(scenario())
+
+
+def test_sqlite_stale_run_save_cannot_erase_release_request_after_restart(tmp_path) -> None:
+    async def scenario() -> None:
+        db_path = tmp_path / "stale-release-intent.sqlite"
+        store = SQLiteStore(db_path)
+        _runtime, _session, run = runtime_with_run(store)
+        client = RecordingComputeClient(store)
+        router = ExecutionProfileRouter(store=store, compute_client=client)
+        created = await router.dispatch(
+            run.run_id,
+            profile=profile(
+                "gpu-workload",
+                {"mode": "required", "class": "h100-80g", "quota": 1},
+            ),
+            compute_pool_id="pool-a",
+            image=IMAGE,
+            command=["python", "-m", "train"],
+        )
+        assert created is not None
+        stale = copy.deepcopy(store.get_run(run.run_id))
+        await router.release(run.run_id, allocation=created)
+        committed = copy.deepcopy(store.get_run(run.run_id).compute_release_request)
+        assert committed is not None
+        store.close()
+
+        recovered_store = SQLiteStore(db_path)
+        recovered = recovered_store.get_run(run.run_id)
+        assert recovered.compute_release_request == committed
+        with pytest.raises(ValueError, match="create/release intents"):
+            recovered_store.save_run(stale)
+        assert recovered_store.get_run(run.run_id).compute_release_request == committed
+        recovered_store.close()
+
+    asyncio.run(scenario())
