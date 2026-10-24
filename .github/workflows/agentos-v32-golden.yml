@@ -38,28 +38,34 @@ jobs:
           grep '^session_id=' /tmp/agentos-v32-golden.txt
           grep '^workflow_id=' /tmp/agentos-v32-golden.txt
           grep '^sandbox_a_id=' /tmp/agentos-v32-golden.txt
+          grep '^sandbox_a_namespace=' /tmp/agentos-v32-golden.txt
           grep '^sandbox_b_id=' /tmp/agentos-v32-golden.txt
+          grep '^sandbox_b_namespace=' /tmp/agentos-v32-golden.txt
           grep '^evidence_manifest=' /tmp/agentos-v32-golden.txt
           grep '^policy_digest=sha256:' /tmp/agentos-v32-golden.txt
           grep '^trace_id=' /tmp/agentos-v32-golden.txt
       - name: Assert real Pod replacement
         run: |
           sandbox_a_id="$(sed -n 's/^sandbox_a_id=//p' /tmp/agentos-v32-golden.txt)"
+          sandbox_a_namespace="$(sed -n 's/^sandbox_a_namespace=//p' /tmp/agentos-v32-golden.txt)"
           sandbox_b_id="$(sed -n 's/^sandbox_b_id=//p' /tmp/agentos-v32-golden.txt)"
+          sandbox_b_namespace="$(sed -n 's/^sandbox_b_namespace=//p' /tmp/agentos-v32-golden.txt)"
           test -n "$sandbox_a_id"
+          test -n "$sandbox_a_namespace"
           test -n "$sandbox_b_id"
+          test -n "$sandbox_b_namespace"
           test "$sandbox_a_id" != "$sandbox_b_id"
 
-          kubectl -n agentos-v32-golden wait             --for=delete "pod/$sandbox_a_id" --timeout=60s
-          kubectl -n agentos-v32-golden wait             --for=condition=Ready "pod/$sandbox_b_id" --timeout=60s
+          kubectl -n "$sandbox_a_namespace" wait --for=delete "pod/$sandbox_a_id" --timeout=60s
+          kubectl -n "$sandbox_b_namespace" wait --for=condition=Ready "pod/$sandbox_b_id" --timeout=60s
 
-          if kubectl -n agentos-v32-golden get             "pod/$sandbox_a_id" >/dev/null 2>&1; then
+          if kubectl -n "$sandbox_a_namespace" get "pod/$sandbox_a_id" >/dev/null 2>&1; then
             echo "old sandbox Pod still exists" >&2
             exit 1
           fi
 
           test "$(
-            kubectl -n agentos-v32-golden get pod               "$sandbox_b_id" -o jsonpath='{.metadata.name}'
+            kubectl -n "$sandbox_b_namespace" get pod "$sandbox_b_id" -o jsonpath='{.metadata.name}'
           )" = "$sandbox_b_id"
       - name: Upload Golden Slice proof
         if: always()
