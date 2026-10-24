@@ -198,3 +198,35 @@ def test_cross_tenant_cannot_observe_retry_state_or_dispatch(persisted_event):
             correlation_id=event.correlation_id,
         ))
     assert driver.signals == []
+
+
+def test_unavailable_workflow_query_has_bounded_attempt_duration(persisted_event):
+    _, _, inbox, event = persisted_event
+
+    class HungQueryDriver(FakeDriver):
+        async def query(self, workflow, *, name):
+            await asyncio.sleep(60)
+
+    driver = HungQueryDriver()
+    dispatcher = TemporalEventDispatcher(inbox, driver)
+    coordinator = EventRetryCoordinator(
+        inbox, dispatcher, clock=lambda: 100.0, jitter=lambda: 1.0,
+        attempt_timeout_seconds=0.01,
+    )
+    outcome = tick(coordinator)
+    assert outcome.status == "retry_scheduled"
+    assert inbox.get_retry_state(event).last_error_class == "transport_unknown"
+    assert inbox.list_pending(run_id="run-a", tenant_id="tenant-a") == [event]
+    assert driver.signals == []
+
+
+def test_invalid_retry_configuration_is_rejected(persisted_event):
+    _, _, inbox, _ = persisted_event
+    driver = FakeDriver()
+    dispatcher = TemporalEventDispatcher(inbox, driver)
+    with pytest.raises(ValueError):
+        EventRetryCoordinator(inbox, dispatcher, max_attempts=0)
+    with pytest.raises(ValueError):
+        EventRetryCoordinator(inbox, dispatcher, base_delay_seconds=0)
+    with pytest.raises(ValueError):
+        EventRetryCoordinator(inbox, dispatcher, attempt_timeout_seconds=0)
