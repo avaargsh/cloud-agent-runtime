@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Mapping
+from typing import Any, Mapping
 
 from .contracts import (
     Approval,
@@ -75,3 +75,8 @@ class Run:
     recovery_state: str = "none"
     recovery_attempts: int = 0
     recovery_evidence: list[dict[str, str]] = field(default_factory=list)
+    # Immutable ComputeRequest intent, persisted before any Control Plane side effect.
+    # ComputeAllocation remains a live Control Plane projection, not Run-owned state.
+    compute_request: dict[str, Any] | None = None
+    # Trusted Pool -> Cluster/Provider route frozen with compute_request on first commit.
+    compute_binding: dict[str, Any] | None = None
