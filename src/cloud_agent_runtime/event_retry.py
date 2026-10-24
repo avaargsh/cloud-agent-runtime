@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import math
 import random
 import time
@@ -36,6 +37,7 @@ class EventRetryCoordinator:
     base_delay_seconds: float = 2.0
     max_delay_seconds: float = 60.0
     max_attempts: int = 8
+    attempt_timeout_seconds: float = 15.0
 
     def __post_init__(self) -> None:
         if self.dispatcher.inbox is not self.inbox:
@@ -51,13 +53,13 @@ class EventRetryCoordinator:
             or not isinstance(n, (int, float))
             or not math.isfinite(n)
             or n <= 0
-            for n in (self.base_delay_seconds, self.max_delay_seconds)
+            for n in (self.base_delay_seconds, self.max_delay_seconds, self.attempt_timeout_seconds)
         ) or self.max_delay_seconds < self.base_delay_seconds:
             raise ValueError("retry delays must be finite positive ordered seconds")
 
     def _next_delay(self, attempt: int) -> float:
         fraction = self.jitter()
-        if not isinstance(fraction, (int, float)) or not 0 <= fraction <= 1:
+        if isinstance(fraction, bool) or not isinstance(fraction, (int, float)) or not math.isfinite(fraction) or not 0 <= fraction <= 1:
             raise ValueError("jitter must return a fraction between zero and one")
         maximum = min(self.max_delay_seconds, self.base_delay_seconds * (2 ** min(attempt - 1, 30)))
         return maximum * (0.5 + 0.5 * fraction)
@@ -87,8 +89,11 @@ class EventRetryCoordinator:
         reason = "transport_unknown"
         blocked = False
         try:
-            confirmed = await self.dispatcher.deliver_pending(
-                run_id=run_id, tenant_id=tenant_id, limit=1
+            confirmed = await asyncio.wait_for(
+                self.dispatcher.deliver_pending(
+                    run_id=run_id, tenant_id=tenant_id, limit=1
+                ),
+                timeout=self.attempt_timeout_seconds,
             )
             if confirmed != 1:
                 raise EventDeliveryUncertain(
