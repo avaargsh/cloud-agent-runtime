@@ -617,6 +617,31 @@ def test_temporal_worker_process_sigkill_restarts_same_workflow_identity(tmp_pat
                     ("waiting", "running"),
                     ("running", "succeeded"),
                 ]
+                assert worker_b.poll() is None
+                evidence = {
+                    "scenario": "worker_sigkill_while_waiting_then_replay",
+                    "temporal_server_mode": "full_local_server",
+                    "runtime_run_id": runtime_run_id,
+                    "session_id": session_id,
+                    "workflow_id": workflow_id,
+                    "first_execution_run_id": first_execution_run_id,
+                    "worker_a_signal": "SIGKILL",
+                    "worker_a_return_code": return_code,
+                    "worker_b_replayed_while_alive": True,
+                    "approval_events_after_duplicate_signal": len(
+                        replayed.get("approval_events", [])
+                    ),
+                    "transition_events": result["transition_events"],
+                    "result_phase": result["phase"],
+                }
+                evidence_dir = Path(
+                    os.environ.get("P0_RECOVERY_EVIDENCE_DIR", str(tmp_path))
+                )
+                evidence_dir.mkdir(parents=True, exist_ok=True)
+                (evidence_dir / "temporal-worker-sigkill-evidence.json").write_text(
+                    json.dumps(evidence, indent=2, sort_keys=True) + "\\n",
+                    encoding="utf-8",
+                )
             finally:
                 for worker in workers:
                     if worker.poll() is None:
