@@ -1,4 +1,5 @@
 import json
+from subprocess import CompletedProcess
 
 from cloud_agent_runtime.kubernetes_sandbox import KubectlResult, KubernetesSandboxProvider
 
@@ -161,3 +162,26 @@ def test_is_gone_requires_namespace_absence_not_only_pod_absence():
     assert namespace in kubectl.namespaces
     assert (namespace, "default-deny-all") in kubectl.policies
     assert provider.is_gone(sandbox.sandbox_id) is False
+
+
+
+def test_kubectl_process_deadline_covers_server_wait_timeout(monkeypatch):
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        observed["timeout"] = kwargs["timeout"]
+        return CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(
+        "cloud_agent_runtime.kubernetes_sandbox.subprocess.run",
+        fake_run,
+    )
+    provider = KubernetesSandboxProvider()
+
+    provider._run_kubectl([
+        "delete", "namespace", "sandbox-a", "--timeout=60s",
+    ])
+    assert observed["timeout"] == 65.0
+
+    provider._run_kubectl(["get", "namespace", "sandbox-a", "-o", "name"])
+    assert observed["timeout"] == 15.0
