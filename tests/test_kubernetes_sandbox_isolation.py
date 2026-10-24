@@ -25,7 +25,7 @@ class FakeKubectl:
             return KubectlResult(0, "", "")
         if args[:2] == ["label", "namespace"]:
             return KubectlResult(0 if args[2] in self.namespaces else 1, "", "")
-        if args[:2] == ["apply", "-f", "-"]:
+        if args[:3] == ["apply", "-f", "-"]:
             manifest = json.loads(stdin or "{}")
             self.manifests.append(manifest)
             kind = manifest["kind"]
