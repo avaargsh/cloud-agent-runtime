@@ -250,7 +250,10 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
         workflow_id = f"agent-run-{run_id}"
         operation_id = f"agent-run-start:{run_id}"
 
-        async with await WorkflowEnvironment.start_time_skipping() as env:
+        # This test injects actual transport loss; no virtual-clock
+        # advancement is needed. Use a full Temporal dev server instead
+        # of the SDK's legacy Java time-skipping test server.
+        async with await WorkflowEnvironment.start_local() as env:
             async with Worker(
                 env.client,
                 task_queue=task_queue,
@@ -324,6 +327,8 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
 
                     reconcile = await asyncio.create_subprocess_exec(
                         sys.executable,
+                        "-X",
+                        "faulthandler",
                         "-m",
                         "cloud_agent_runtime.recovery_probe",
                         "reconcile-sqlite",

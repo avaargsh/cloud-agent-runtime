@@ -15,7 +15,7 @@
 
 | ID | Scenario / fault boundary | Required invariant and evidence | Acceptance boundary |
 |---|---|---|---|
-| R01 | Temporal accepts StartWorkflow; response frames are dropped by a TCP/HTTP2 proxy; caller is blocked then SIGKILLed; a new process opens SQLite | Proxy log proves request-forward and response-drop; caller exit is SIGKILL; same Run ID, stable `agent-run-start:<run_id>` operation ID and deterministic Workflow ID are recovered; history has exactly one WorkflowExecutionStarted event; duplicate start is rejected | Dedicated ACK-drop integration against Temporal SDK test service. Must not be called production Temporal acceptance. |
+| R01 | Temporal accepts StartWorkflow; response frames are dropped by a TCP/HTTP2 proxy; caller is blocked then SIGKILLed; a new process opens SQLite | Proxy log proves request-forward and response-drop; caller exit is SIGKILL; same Run ID, stable `agent-run-start:<run_id>` operation ID and deterministic Workflow ID are recovered; history has exactly one WorkflowExecutionStarted event; duplicate start is rejected | Dedicated ACK-drop integration against a disposable **full local Temporal development server** (via `WorkflowEnvironment.start_local()`), with injected HTTP/2 response-drop. Not deployed-production Temporal acceptance. |
 | R02 | Caller dies after provider accepts start but before local WorkflowRef is durably bound | New process reopens the same store and reconciles by original Run ID/Workflow ID; no second start; audit has durable pre-call intent and post-restart attach evidence | Separate caller-process + SQLite + Temporal integration test |
 | R03 | Provider Describe/query cannot establish whether a start was accepted | Run stays `unknown`; recovery records a failed closed observation; no replacement workflow is created | Unit/driver tests are necessary but cannot replace the R01/R02 remote fault experiment |
 | R04 | Duplicate start attaches to a running Workflow; deterministic ID already points to a terminal Workflow; provider status is absent | Running execution can be attached only after status verification; terminal/unknown status fails closed | Temporal driver tests on exact SHA |
@@ -42,6 +42,12 @@ For each run, retain these fields in the CI artifact or linked issue comment:
 
 ## Current production boundary
 
-A Temporal SDK test server with a TCP proxy and an OS-level caller SIGKILL proves the injected client fault against that test service. A disposable-kind Kubernetes API test proves the sandbox adapter's cleanup recovery against that disposable cluster. Neither proves behavior against the deployed production Temporal cluster, production sandbox provider, or production network-isolation policies.
+A disposable full local Temporal development server with a TCP proxy and an OS-level caller SIGKILL proves the injected client fault against that test server. A disposable-kind Kubernetes API test proves the sandbox adapter's cleanup recovery against that disposable cluster. Neither proves behavior against the deployed production Temporal cluster, production sandbox provider, or production network-isolation policies.
 
 Issue #30 remains open until all code/CI rows have exact-SHA evidence and production-specific rows are either separately executed or explicitly accepted as blocked by the required provider/cluster contract. P1 credential broker/security workspace work and P2 multi-Agent/GPU scheduling are outside this matrix.
+
+## Python 3.12 subprocess-shutdown regression (2026-10-24)
+
+The legacy Java `WorkflowEnvironment.start_time_skipping()` was previously used in both process-recovery and ACK-drop tests even though neither scenario requires virtual time. On main `9a37e9a7e0ee6d8dc95c77544aca5ee2cbcdfc81`, Python 3.12 intermittently exited with SIGSEGV (-11) **after** the `reconcile-sqlite` helper had printed persisted `attached` evidence. The precise native SDK/interpreter cause was not established; do not describe this as a proven SDK defect.
+
+The two fault-injection tests now use `WorkflowEnvironment.start_local()` to exercise full local Temporal server semantics. The process-restart test repeats independent reconciliations; both tests enable `python -X faulthandler` in reconciliation children. They still require zero exit status and assert accepted/duplicate starts, canonical IDs, on-disk intent/attachment evidence, and SIGKILL or ACK-drop semantics. This changes the **test server boundary**, not production recovery logic, and retains deployed-Temporal replay/ACK-drop and external-provider acceptance as **NOT RUN**.

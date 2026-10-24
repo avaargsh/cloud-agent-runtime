@@ -5,6 +5,8 @@ import json
 import signal
 import sqlite3
 import sys
+
+import pytest
 from uuid import uuid4
 
 from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -14,11 +16,15 @@ from temporalio.worker import Worker
 from cloud_agent_runtime.temporal_workflow import AgentRunWorkflow
 
 
-def test_real_subprocess_sigkill_after_temporal_acceptance_reconciles_sqlite(tmp_path) -> None:
+@pytest.mark.parametrize("_attempt", range(6))
+def test_real_subprocess_sigkill_after_temporal_acceptance_reconciles_sqlite(tmp_path, _attempt: int) -> None:
     async def scenario() -> None:
         db_path = tmp_path / "process-restart.sqlite"
         task_queue = f"p0-process-recovery-{uuid4()}"
-        async with await WorkflowEnvironment.start_time_skipping() as env:
+        # This recovery test uses real elapsed time; the legacy Java
+        # time-skipping test server is unnecessary and has a different
+        # lifecycle/transport behavior from a full Temporal server.
+        async with await WorkflowEnvironment.start_local() as env:
             target = env.client.service_client.config.target_host
             async with Worker(
                 env.client,
@@ -63,6 +69,8 @@ def test_real_subprocess_sigkill_after_temporal_acceptance_reconciles_sqlite(tmp
 
                 reconcile = await asyncio.create_subprocess_exec(
                     sys.executable,
+                    "-X",
+                    "faulthandler",
                     "-m",
                     "cloud_agent_runtime.recovery_probe",
                     "reconcile-sqlite",
