@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import math
 from pathlib import Path
 import sqlite3
 
@@ -14,6 +15,14 @@ _TERMINAL_RUN_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
 
 class EventConflictError(ValueError):
     """An event ID has already been bound to different immutable content."""
+
+
+@dataclass(frozen=True)
+class EventRetryState:
+    attempts: int
+    next_attempt_at: float
+    last_error_class: str
+    blocked: bool
 
 
 @dataclass(frozen=True)
@@ -94,6 +103,17 @@ class SQLiteEventInbox:
                 event_id TEXT PRIMARY KEY,
                 workflow_id TEXT NOT NULL,
                 workflow_run_id TEXT
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS external_event_retries (
+                event_id TEXT PRIMARY KEY,
+                attempts INTEGER NOT NULL CHECK (attempts >= 1),
+                next_attempt_at REAL NOT NULL,
+                last_error_class TEXT NOT NULL,
+                blocked INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -184,6 +204,83 @@ class SQLiteEventInbox:
         ).fetchall()
         return [EventEnvelope.from_dict(json.loads(row[0])) for row in rows]
 
+    def _assert_stored_event(self, event: EventEnvelope) -> None:
+        self._verify_owner(event.run_id, event.tenant_id)
+        row = self._connection.execute(
+            "SELECT payload FROM external_events "
+            "WHERE event_id = ? AND run_id = ? AND tenant_id = ?",
+            (event.event_id, event.run_id, event.tenant_id),
+        ).fetchone()
+        expected = json.dumps(event.to_dict(), sort_keys=True, separators=(",", ":"))
+        if row is None or row[0] != expected:
+            raise EventConflictError("retry state is not bound to stored event")
+
+    def get_retry_state(self, event: EventEnvelope) -> EventRetryState | None:
+        """Read durable retry eligibility for the exact immutable event."""
+        self._assert_stored_event(event)
+        row = self._connection.execute(
+            "SELECT attempts, next_attempt_at, last_error_class, blocked "
+            "FROM external_event_retries WHERE event_id = ?",
+            (event.event_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return EventRetryState(row[0], row[1], row[2], bool(row[3]))
+
+    def record_retry_failure(
+        self,
+        event: EventEnvelope,
+        *,
+        next_attempt_at: float,
+        last_error_class: str,
+        blocked: bool = False,
+    ) -> EventRetryState:
+        """Retain an unconfirmed event's next retry eligibility atomically."""
+        if (
+            isinstance(next_attempt_at, bool)
+            or not isinstance(next_attempt_at, (int, float))
+            or not math.isfinite(next_attempt_at)
+            or next_attempt_at < 0
+        ):
+            raise ValueError("next_attempt_at must be a nonnegative finite timestamp")
+        if not isinstance(last_error_class, str) or not last_error_class.strip():
+            raise ValueError("last_error_class must be nonempty")
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            self._assert_stored_event(event)
+            receipt = self._connection.execute(
+                "SELECT 1 FROM external_event_receipts WHERE event_id = ?",
+                (event.event_id,),
+            ).fetchone()
+            if receipt is not None:
+                raise EventConflictError("already-delivered event cannot be scheduled")
+            self._connection.execute(
+                "INSERT INTO external_event_retries "
+                "(event_id, attempts, next_attempt_at, last_error_class, blocked) "
+                "VALUES (?, 1, ?, ?, ?) "
+                "ON CONFLICT(event_id) DO UPDATE SET "
+                "attempts = attempts + 1, next_attempt_at = excluded.next_attempt_at, "
+                "last_error_class = excluded.last_error_class, blocked = excluded.blocked",
+                (event.event_id, float(next_attempt_at), last_error_class, int(blocked)),
+            )
+            row = self._connection.execute(
+                "SELECT attempts, next_attempt_at, last_error_class, blocked "
+                "FROM external_event_retries WHERE event_id = ?",
+                (event.event_id,),
+            ).fetchone()
+        assert row is not None
+        return EventRetryState(row[0], row[1], row[2], bool(row[3]))
+
+    def reset_retry_state(self, event: EventEnvelope) -> None:
+        """Trusted operator action; no delivery receipt is removed."""
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            self._assert_stored_event(event)
+            self._connection.execute(
+                "DELETE FROM external_event_retries WHERE event_id = ?",
+                (event.event_id,),
+            )
+
     def mark_delivered(self, event: EventEnvelope, workflow: WorkflowRef) -> None:
         """Persist a receipt only after the owning workflow has confirmed it.
 
@@ -217,11 +314,19 @@ class SQLiteEventInbox:
             if existing is not None:
                 if tuple(existing) != receipt:
                     raise EventConflictError("delivery receipt has conflicting workflow")
+                self._connection.execute(
+                    "DELETE FROM external_event_retries WHERE event_id = ?",
+                    (event.event_id,),
+                )
                 return
             self._connection.execute(
                 "INSERT INTO external_event_receipts "
                 "(event_id, workflow_id, workflow_run_id) VALUES (?, ?, ?)",
                 (event.event_id, *receipt),
+            )
+            self._connection.execute(
+                "DELETE FROM external_event_retries WHERE event_id = ?",
+                (event.event_id,),
             )
 
     def close(self) -> None:
