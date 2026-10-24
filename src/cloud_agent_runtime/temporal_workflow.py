@@ -21,6 +21,7 @@ class AgentRunWorkflowState:
     processed_approval_ids: set[str] = field(
         default_factory=set
     )
+    external_events: list[dict[str, Any]] = field(default_factory=list)
     evidence_refs: list[str] = field(
         default_factory=list
     )
@@ -145,7 +146,34 @@ class AgentRunWorkflow:
             "transition_events": list(
                 self._state.transition_events
             ),
+            "external_events": list(self._state.external_events),
         }
+
+    @workflow.signal(name="external_event_received")
+    def external_event_received(self, payload: dict[str, Any]) -> None:
+        """Record one immutable reference-only envelope, never execute its intent.
+
+        This is an inbox acknowledgment, not business approval or a tool call.
+        The trusted dispatcher verifies tenant/Session ownership before sending.
+        """
+        state = self._state
+        if state is None or state.terminal or not isinstance(payload, dict):
+            return
+        event_id = payload.get("event_id")
+        if (
+            payload.get("schema_version") != 1
+            or payload.get("run_id") != state.runtime_run_id
+            or not isinstance(event_id, str)
+            or not event_id.strip()
+        ):
+            return
+        if any(e.get("event_id") == event_id for e in state.external_events):
+            return
+        # Bound untrusted event history; saturation leaves inbox items pending
+        # instead of falsely acknowledging or growing history without limit.
+        if len(state.external_events) >= 1000:
+            return
+        state.external_events.append(dict(payload))
 
     @workflow.signal(name="approval_resolved")
     def approval_resolved(
@@ -339,6 +367,7 @@ class AgentRunWorkflow:
             "approval_events": list(
                 self._state.approval_events
             ),
+            "external_events": list(self._state.external_events),
             "transition_events": list(
                 self._state.transition_events
             ),

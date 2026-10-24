@@ -13,6 +13,7 @@ from .contracts import (
     EvidenceRef,
 )
 from .event_inbox import EventConflictError, EventEnvelope, SQLiteEventInbox
+from .event_delivery import EventDeliveryUncertain, TemporalEventDispatcher
 from .evidence_archive import ArchivedEvidence, EvidenceArchive
 from .evidence_collector import (
     AppendOnlyEvidenceCollector,
@@ -68,6 +69,7 @@ __all__ = [
     "CapabilityBinding",
     "EventConflictError",
     "EventEnvelope",
+    "EventDeliveryUncertain",
     "SQLiteEventInbox",
     "EvidenceArchive",
     "EvidenceEvent",
@@ -98,6 +100,7 @@ __all__ = [
     "SandboxStatus",
     "Session",
     "SessionStatus",
+    "TemporalEventDispatcher",
     "TemporalRunBridge",
     "TemporalRunStatus",
     "TemporalWorkflowDriver",
