@@ -5,6 +5,8 @@ import json
 import signal
 import sqlite3
 import sys
+
+import pytest
 from uuid import uuid4
 
 from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -14,7 +16,8 @@ from temporalio.worker import Worker
 from cloud_agent_runtime.temporal_workflow import AgentRunWorkflow
 
 
-def test_real_subprocess_sigkill_after_temporal_acceptance_reconciles_sqlite(tmp_path) -> None:
+@pytest.mark.parametrize("_attempt", range(6))
+def test_real_subprocess_sigkill_after_temporal_acceptance_reconciles_sqlite(tmp_path, _attempt: int) -> None:
     async def scenario() -> None:
         db_path = tmp_path / "process-restart.sqlite"
         task_queue = f"p0-process-recovery-{uuid4()}"
