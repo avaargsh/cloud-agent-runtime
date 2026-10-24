@@ -196,3 +196,78 @@ def test_waiting_and_resume_transitions_are_audited() -> None:
         "evidence://approval/decision",
     ]
 
+
+def test_late_approval_does_not_rewrite_completed_run() -> None:
+    workflow = initialized_workflow()
+    workflow.complete_run(
+        {
+            "event_id": "complete-before-approval",
+            "result": {"summary": "done"},
+            "evidence_refs": ["evidence://run/completed"],
+        }
+    )
+    terminal_state = workflow.run_state()
+
+    workflow.approval_resolved(
+        {
+            "approval_id": "late-approved",
+            "approved": True,
+            "evidence_refs": ["evidence://late/approved"],
+        }
+    )
+    workflow.approval_resolved(
+        {
+            "approval_id": "late-denied",
+            "approved": False,
+            "reason": "too late",
+            "evidence_refs": ["evidence://late/denied"],
+        }
+    )
+
+    assert workflow.run_state() == terminal_state
+
+
+def test_late_approval_does_not_rewrite_cancelled_run() -> None:
+    workflow = initialized_workflow()
+    workflow.cancel_run({"reason": "cancelled by operator"})
+    terminal_state = workflow.run_state()
+
+    workflow.approval_resolved(
+        {
+            "approval_id": "late-approved",
+            "approved": True,
+            "evidence_refs": ["evidence://late/approved"],
+        }
+    )
+    assert workflow.run_state() == terminal_state
+
+
+def test_approval_does_not_implicitly_resume_paused_run() -> None:
+    workflow = initialized_workflow()
+    workflow.pause_run({"event_id": "manual-pause"})
+
+    workflow.approval_resolved(
+        {
+            "approval_id": "approval-while-paused",
+            "approved": True,
+            "evidence_refs": ["evidence://approval/decision"],
+        }
+    )
+
+    paused_state = workflow.run_state()
+    assert paused_state["phase"] == "paused"
+    assert paused_state["paused"] is True
+    assert len(paused_state["approval_events"]) == 1
+    assert paused_state["evidence_refs"] == ["evidence://approval/decision"]
+    assert [event["event_type"] for event in paused_state["transition_events"]] == [
+        "pause_run",
+    ]
+
+    workflow.resume_run({"event_id": "manual-resume"})
+    resumed_state = workflow.run_state()
+    assert resumed_state["phase"] == "running"
+    assert resumed_state["paused"] is False
+    assert [event["event_type"] for event in resumed_state["transition_events"]] == [
+        "pause_run",
+        "resume_run",
+    ]
