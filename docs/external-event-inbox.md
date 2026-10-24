@@ -115,3 +115,62 @@ driver RPC times below the configured lease and re-invoke after failures. Only
 use this implementation for the local SQLite reference setup; production
 deployments still need authorized persistent retry coordination, telemetry,
 bounded RPC deadlines, provider credentials and a retained-history policy.
+
+## Slice 4: opt-in single-writer retry reconciliation (Issue #61)
+
+The optional `EventRetryCoordinator` wraps the existing confirmed-delivery
+dispatcher. It processes **one oldest unreceipted event for a canonical Run per
+invocation**, preserving per-Run event order and leaving newer events behind a
+deferred or blocked head event. Its durable SQLite
+`external_event_retries` row tracks attempt count, next eligible **UTC epoch**
+timestamp, a non-sensitive error category, and operator-blocked status.
+The immutable Inbox event and canonical Temporal execution binding remain the
+authority. When the Workflow's exact observed event is confirmed,
+`mark_delivered()` atomically commits a receipt and removes retry state.
+
+Use the same Inbox instance when constructing both adapters:
+
+```python
+from cloud_agent_runtime import (
+    SQLiteEventInbox, TemporalWorkflowDriver, TemporalEventDispatcher,
+)
+from cloud_agent_runtime.event_retry import EventRetryCoordinator
+
+inbox = SQLiteEventInbox("runtime.sqlite")
+driver = await TemporalWorkflowDriver.connect(
+    "localhost:7233", task_queue="agent-runs"
+)
+dispatcher = TemporalEventDispatcher(inbox, driver)
+coordinator = EventRetryCoordinator(inbox, dispatcher)
+outcome = await coordinator.reconcile_once(
+    run_id="canonical-run-456", tenant_id="tenant-a"
+)
+# outcome.status: idle | confirmed | inflight | deferred | retry_scheduled | blocked
+```
+
+A trusted external job may invoke this method periodically; **no scheduler,
+background Worker, approval execution, GPU operation or authorization API is
+installed by the library**. The caller must ensure only **one coordinator
+process for the SQLite database**, and must not concurrently call the raw
+dispatcher on the same Run. The reference path is **not safe for HA or
+multi-writer dispatch**; leases/fencing and production datastore semantics
+are a separate milestone.
+
+On transport ACK ambiguity, an unavailable Worker, a Query timeout, or a
+temporary RPC failure, the coordinator retains the pending event and persists
+bounded exponential backoff (with jitter) across process restarts. Each
+attempt has a wall-clock timeout; hitting the attempt budget leaves the event
+**blocked**, not deleted or marked successful. A terminal unconfirmed
+Workflow, canonical identity conflict, or conflicting remote event content
+blocks immediately. Operator review may call
+`inbox.reset_retry_state(event)` for an immutable event *only after* resolving
+the underlying cause and validating authorization; this resets retry
+eligibility, **not** event identity or a receipt.
+
+Neither a successful Signal RPC nor a recorded delivery receipt proves a
+business decision, approval, tool execution or compute side effect. Tests in
+this slice cover SQLite reopen/retry, ambiguous ACK, unconfirmed Signal,
+permanent conflicts, retry exhaustion and a bounded hung Query. Production
+authentication/TLS, a persisted Temporal Server restart, HA, multi-writer
+leases, historical Workflow replay compatibility and actual business execution
+remain **NOT RUN** and outside this slice.

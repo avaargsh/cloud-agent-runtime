@@ -12,7 +12,11 @@ from .workflow import WorkflowRef
 
 
 class EventDeliveryUncertain(RuntimeError):
-    """Event remains in the inbox; do not treat Signal transport ACK as delivery."""
+    """Event remains in the inbox; Signal transport ACK is not delivery."""
+
+    def __init__(self, message: str, *, reason: str = "unknown") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass
@@ -43,7 +47,7 @@ class TemporalEventDispatcher:
             raise PermissionError("Temporal workflow identity does not match canonical Run")
         events = state.get("external_events", [])
         if not isinstance(events, list):
-            raise EventDeliveryUncertain("Temporal event observation is unavailable")
+            raise EventDeliveryUncertain("Temporal event observation is unavailable", reason="observation_unavailable")
         for received in events:
             if isinstance(received, dict) and received.get("event_id") == event.event_id:
                 if json.dumps(received, sort_keys=True) != json.dumps(
@@ -83,7 +87,7 @@ class TemporalEventDispatcher:
                     continue
                 if state.get("terminal"):
                     raise EventDeliveryUncertain(
-                        f"workflow terminal before event {event.event_id} was confirmed"
+                        f"workflow terminal before event {event.event_id} was confirmed", reason="terminal_unconfirmed"
                     )
                 try:
                     await self.driver.signal(
@@ -95,7 +99,7 @@ class TemporalEventDispatcher:
                     # Server may have accepted the Signal before transport failure.
                     # Leave it pending: the next call observes History before resending.
                     raise EventDeliveryUncertain(
-                        f"Temporal Signal outcome is uncertain for {event.event_id}"
+                        f"Temporal Signal outcome is uncertain for {event.event_id}", reason="signal_ambiguous"
                     ) from exc
 
                 loop = asyncio.get_running_loop()
@@ -108,11 +112,11 @@ class TemporalEventDispatcher:
                         break
                     if state.get("terminal"):
                         raise EventDeliveryUncertain(
-                            f"workflow terminal before event {event.event_id} was confirmed"
+                            f"workflow terminal before event {event.event_id} was confirmed", reason="terminal_unconfirmed"
                         )
                     if loop.time() >= deadline:
                         raise EventDeliveryUncertain(
-                            f"event {event.event_id} was not confirmed by Temporal workflow"
+                            f"event {event.event_id} was not confirmed by Temporal workflow", reason="confirmation_timeout"
                         )
                     await asyncio.sleep(max(0.0, self.confirmation_poll_interval_seconds))
             finally:
