@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import json
 import re
 from typing import Any
 
@@ -87,9 +86,6 @@ def test_ordinary_worker_profile_never_calls_compute_api() -> None:
         result = await router.dispatch(
             run.run_id,
             profile=profile("worker", {"mode": "none"}),
-            compute_pool_id="pool-a",
-            image=IMAGE,
-            command=["python", "-m", "worker"],
         )
 
         assert result is None
