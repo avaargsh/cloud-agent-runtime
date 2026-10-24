@@ -345,8 +345,53 @@ class ManagementComputeClient:
             if spec.get(field) != value:
                 raise ManagementProtocolError(f"Authorized Desired spec mismatch for {field}")
 
-    async def submit_or_reconcile(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Commit/reconcile through the public Management route using the same key."""
+    async def resolve_binding(
+        self,
+        *,
+        project_id: str,
+        compute_pool_id: str,
+    ) -> dict[str, Any]:
+        """Resolve a trusted Pool route once, before the Run intent is persisted."""
+        self._safe_path_segment(project_id, "projectId")
+        self._safe_path_segment(compute_pool_id, "computePoolId")
+        try:
+            resolved = await self.binding_resolver.resolve(
+                project_id=project_id,
+                compute_pool_id=compute_pool_id,
+            )
+        except Exception as exc:
+            # No request has been sent yet, so this is a setup failure, not
+            # an unknown side-effect outcome.
+            raise ManagementProtocolError(
+                f"Trusted ComputePool binding resolver failed ({type(exc).__name__})"
+            ) from None
+        if not isinstance(resolved, Mapping):
+            raise ManagementProtocolError("ComputePool binding resolver returned a non-object")
+        cluster_id = resolved.get("clusterId")
+        provider = resolved.get("provider")
+        binding_generation = resolved.get("providerBindingGeneration")
+        if not isinstance(cluster_id, str) or not cluster_id:
+            raise ManagementProtocolError("Trusted ComputePool binding is missing clusterId")
+        if not isinstance(provider, str) or not provider:
+            raise ManagementProtocolError("Trusted ComputePool binding is missing provider")
+        if type(binding_generation) is not int or binding_generation < 1:
+            raise ManagementProtocolError("Trusted ComputePool binding has invalid providerBindingGeneration")
+        self._safe_path_segment(cluster_id, "clusterId")
+        return {
+            "projectId": project_id,
+            "computePoolId": compute_pool_id,
+            "clusterId": cluster_id,
+            "provider": provider,
+            "providerBindingGeneration": binding_generation,
+        }
+
+    async def submit_or_reconcile(
+        self,
+        request: dict[str, Any],
+        *,
+        binding: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Commit/reconcile using the route frozen with the request before its first side effect."""
         self._validate_request(request)
         request = copy_json(request)
         request_id = request["requestId"]
@@ -354,35 +399,28 @@ class ManagementComputeClient:
         pool_id = request["computePoolId"]
         workload_id = request["workload"]["id"]
 
+        if not isinstance(binding, Mapping):
+            raise ManagementProtocolError("Persisted ComputePool route binding is missing")
+        if binding.get("projectId") != project_id or binding.get("computePoolId") != pool_id:
+            raise ManagementProtocolError("Persisted route binding does not match ComputeRequest Project/Pool")
+        cluster_id = binding.get("clusterId")
+        provider = binding.get("provider")
+        binding_generation = binding.get("providerBindingGeneration")
+        if not isinstance(cluster_id, str) or not cluster_id:
+            raise ManagementProtocolError("Persisted route binding is missing clusterId")
+        if not isinstance(provider, str) or not provider:
+            raise ManagementProtocolError("Persisted route binding is missing provider")
+        if type(binding_generation) is not int or binding_generation < 1:
+            raise ManagementProtocolError("Persisted route binding has invalid providerBindingGeneration")
+        self._safe_path_segment(cluster_id, "clusterId")
+
         token = await self.token_provider.access_token_for_project(project_id)
-        if not isinstance(token, str) or not token or any(c in token for c in "\r\n"):
+        if not isinstance(token, str) or not token or any(c in token for c in "\\r\\n"):
             raise ManagementRequestRejected(
                 status=401,
                 request_id=request_id,
                 message="No valid short-lived project access token was supplied",
             )
-
-        try:
-            binding = await self.binding_resolver.resolve(
-                project_id=project_id,
-                compute_pool_id=pool_id,
-            )
-        except Exception as exc:
-            raise ManagementRequestOutcomeUnknown(
-                request_id,
-                f"Trusted ComputePool binding resolver failed ({type(exc).__name__}); no mutation sent",
-            ) from None
-        if not isinstance(binding, Mapping):
-            raise ManagementProtocolError("ComputePool binding resolver returned a non-object")
-        cluster_id = binding.get("clusterId")
-        provider = binding.get("provider")
-        binding_generation = binding.get("providerBindingGeneration")
-        if not isinstance(cluster_id, str) or not cluster_id:
-            raise ManagementProtocolError("Trusted ComputePool binding is missing clusterId")
-        if not isinstance(provider, str) or not provider:
-            raise ManagementProtocolError("Trusted ComputePool binding is missing provider")
-        if type(binding_generation) is not int or binding_generation < 1:
-            raise ManagementProtocolError("Trusted ComputePool binding has invalid providerBindingGeneration")
 
         resource_url, receipt_url = self._paths(
             cluster_id=cluster_id,
