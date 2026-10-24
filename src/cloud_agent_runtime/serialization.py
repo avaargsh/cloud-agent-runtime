@@ -184,6 +184,9 @@ def run_to_dict(run: Run) -> dict[str, Any]:
         "recovery_state": run.recovery_state,
         "recovery_attempts": run.recovery_attempts,
         "recovery_evidence": [dict(item) for item in run.recovery_evidence],
+        "compute_request": dict(run.compute_request) if run.compute_request is not None else None,
+        "compute_binding": dict(run.compute_binding) if run.compute_binding is not None else None,
+        "compute_release_request": dict(run.compute_release_request) if run.compute_release_request is not None else None,
     }
 
 
@@ -234,4 +237,7 @@ def run_from_dict(data: dict[str, Any]) -> Run:
             {str(key): str(value) for key, value in item.items()}
             for item in data.get("recovery_evidence", [])
         ],
+        compute_request=(dict(data["compute_request"]) if data.get("compute_request") is not None else None),
+        compute_binding=(dict(data["compute_binding"]) if data.get("compute_binding") is not None else None),
+        compute_release_request=(dict(data["compute_release_request"]) if data.get("compute_release_request") is not None else None),
     )

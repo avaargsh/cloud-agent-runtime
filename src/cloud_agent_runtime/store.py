@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import json
+import re
 import sqlite3
 from pathlib import Path
-from typing import Protocol
+from threading import RLock
+from typing import Any, Protocol
 
 from .models import Run, Session
 from .serialization import (
@@ -27,12 +30,106 @@ class RuntimeStore(Protocol):
 
     def get_run(self, run_id: str) -> Run:
         ...
+    def persist_compute_request(
+        self,
+        run_id: str,
+        candidate: dict[str, Any],
+        binding: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Atomically persist request intent and its first trusted route binding."""
+        ...
+
+
+    def persist_compute_release_request(
+        self,
+        run_id: str,
+        candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Atomically persist a distinct, immutable release intent before DELETE."""
+        ...
+
+
+
+def _same_compute_intent(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    # Racing retries may generate different candidate request IDs. Compare
+    # the logical intent and always return the first stored idempotency key.
+    left_intent = {
+        key: value for key, value in left.items()
+        if key not in {"requestId", "intentDigest"}
+    }
+    right_intent = {
+        key: value for key, value in right.items()
+        if key not in {"requestId", "intentDigest"}
+    }
+    return left_intent == right_intent
+
+
+def _same_release_intent(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_intent = {
+        key: value for key, value in left.items()
+        if key not in {"requestId", "intentDigest"}
+    }
+    right_intent = {
+        key: value for key, value in right.items()
+        if key not in {"requestId", "intentDigest"}
+    }
+    return left_intent == right_intent
+
+
+def _validate_release_link(run: Run, candidate: dict[str, Any]) -> None:
+    if candidate.get("apiVersion") != "compute.release-request/v0.1":
+        raise ValueError("unsupported ComputeReleaseRequest apiVersion")
+    release_id = candidate.get("requestId")
+    source_id_field = candidate.get("sourceRequestId")
+    if not isinstance(release_id, str) or not re.fullmatch(r"[0-9a-f]{32}", release_id):
+        raise ValueError("release requestId must be exactly 32 lowercase hexadecimal characters")
+    if not isinstance(source_id_field, str) or not re.fullmatch(r"[0-9a-f]{32}", source_id_field):
+        raise ValueError("release sourceRequestId must be exactly 32 lowercase hexadecimal characters")
+    if release_id == source_id_field:
+        raise ValueError("release requestId must differ from the create requestId")
+    digest = candidate.get("intentDigest")
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ValueError("release intentDigest is malformed")
+    canonical = json.dumps(
+        {key: value for key, value in candidate.items() if key != "intentDigest"},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    expected_digest = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if digest != expected_digest:
+        raise ValueError("release intentDigest does not match the persisted release intent")
+    source = run.compute_request
+    if source is None or run.compute_binding is None:
+        raise ValueError("cannot persist release intent without a committed ComputeRequest and route binding")
+    source_id = source.get("requestId")
+    release_id = candidate.get("requestId")
+    if not isinstance(source_id, str) or source_id != candidate.get("sourceRequestId"):
+        raise ValueError("release sourceRequestId does not match the immutable create request")
+    if not isinstance(release_id, str) or release_id == source_id:
+        raise ValueError("release requestId must be distinct from the create requestId")
+    workload = source.get("workload")
+    if not isinstance(workload, dict):
+        raise ValueError("persisted ComputeRequest workload is malformed")
+    expected = {
+        "projectId": source.get("projectId"),
+        "computePoolId": source.get("computePoolId"),
+        "workloadId": workload.get("id"),
+        "correlation": source.get("correlation"),
+    }
+    for field, value in expected.items():
+        if candidate.get(field) != value:
+            raise ValueError(f"release intent {field} does not match the persisted create request")
+    generation = candidate.get("expectedGeneration")
+    if type(generation) is not int or generation < 1:
+        raise ValueError("release intent expectedGeneration must be a positive server-issued Generation")
 
 
 class InMemoryStore:
     def __init__(self) -> None:
         self.sessions: dict[str, Session] = {}
         self.runs: dict[str, Run] = {}
+        self._lock = RLock()
 
     def save_session(self, session: Session) -> None:
         existing = self.sessions.get(session.session_id)
@@ -54,18 +151,72 @@ class InMemoryStore:
             raise KeyError(f"unknown session: {session_id}") from exc
 
     def save_run(self, run: Run) -> None:
-        existing = self.runs.get(run.run_id)
-        if existing is not None and existing.session_id != run.session_id:
-            raise ValueError(
-                "run identity is immutable: session_id must match the existing run"
-            )
-        self.runs[run.run_id] = deepcopy(run)
+        with self._lock:
+            existing = self.runs.get(run.run_id)
+            if existing is not None and existing.session_id != run.session_id:
+                raise ValueError(
+                    "run identity is immutable: session_id must match the existing run"
+                )
+            if existing is not None and (
+                existing.compute_request != run.compute_request
+                or existing.compute_binding != run.compute_binding
+                or existing.compute_release_request != run.compute_release_request
+            ):
+                raise ValueError(
+                    "compute create/release intents and route binding can only be initialized through atomic persistence"
+                )
+            self.runs[run.run_id] = deepcopy(run)
 
     def get_run(self, run_id: str) -> Run:
-        try:
-            return deepcopy(self.runs[run_id])
-        except KeyError as exc:
-            raise KeyError(f"unknown run: {run_id}") from exc
+        with self._lock:
+            try:
+                return deepcopy(self.runs[run_id])
+            except KeyError as exc:
+                raise KeyError(f"unknown run: {run_id}") from exc
+
+    def persist_compute_request(
+        self,
+        run_id: str,
+        candidate: dict[str, Any],
+        binding: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        with self._lock:
+            try:
+                run = deepcopy(self.runs[run_id])
+            except KeyError as exc:
+                raise KeyError(f"unknown run: {run_id}") from exc
+            if run.compute_request is not None:
+                if not _same_compute_intent(run.compute_request, candidate):
+                    raise ValueError("compute request intent is immutable for a Run")
+                if run.compute_binding is None:
+                    raise ValueError("persisted ComputeRequest has no authoritative route binding")
+                return deepcopy(run.compute_request), deepcopy(run.compute_binding)
+            if run.compute_binding is not None:
+                raise ValueError("Run has an orphaned compute route binding without a request")
+            run.compute_request = deepcopy(candidate)
+            run.compute_binding = deepcopy(binding)
+            self.runs[run_id] = run
+            return deepcopy(run.compute_request), deepcopy(run.compute_binding)
+
+
+    def persist_compute_release_request(
+        self,
+        run_id: str,
+        candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        with self._lock:
+            try:
+                run = deepcopy(self.runs[run_id])
+            except KeyError as exc:
+                raise KeyError(f"unknown run: {run_id}") from exc
+            _validate_release_link(run, candidate)
+            if run.compute_release_request is not None:
+                if not _same_release_intent(run.compute_release_request, candidate):
+                    raise ValueError("compute release intent is immutable for a Run")
+                return deepcopy(run.compute_release_request)
+            run.compute_release_request = deepcopy(candidate)
+            self.runs[run_id] = run
+            return deepcopy(run.compute_release_request)
 
 
 class SQLiteStore:
@@ -160,6 +311,14 @@ class SQLiteStore:
                         "run identity is immutable: session_id must match "
                         "the existing run"
                     )
+                if (
+                    existing.compute_request != run.compute_request
+                    or existing.compute_binding != run.compute_binding
+                    or existing.compute_release_request != run.compute_release_request
+                ):
+                    raise ValueError(
+                        "compute create/release intents and route binding can only be initialized through atomic persistence"
+                    )
             self._connection.execute(
                 """
                 INSERT INTO runs(run_id, payload)
@@ -180,6 +339,75 @@ class SQLiteStore:
             raise KeyError(f"unknown run: {run_id}")
 
         return run_from_dict(json.loads(row[0]))
+
+    def persist_compute_request(
+        self,
+        run_id: str,
+        candidate: dict[str, Any],
+        binding: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        # Persist the request ID and first trusted route binding in one
+        # serialized transaction before the external Management side effect.
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            row = self._connection.execute(
+                "SELECT payload FROM runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown run: {run_id}")
+            run = run_from_dict(json.loads(row[0]))
+            if run.compute_request is not None:
+                if not _same_compute_intent(run.compute_request, candidate):
+                    raise ValueError("compute request intent is immutable for a Run")
+                if run.compute_binding is None:
+                    raise ValueError("persisted ComputeRequest has no authoritative route binding")
+                return deepcopy(run.compute_request), deepcopy(run.compute_binding)
+            if run.compute_binding is not None:
+                raise ValueError("Run has an orphaned compute route binding without a request")
+            run.compute_request = deepcopy(candidate)
+            run.compute_binding = deepcopy(binding)
+            payload = json.dumps(
+                run_to_dict(run),
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            self._connection.execute(
+                "UPDATE runs SET payload = ? WHERE run_id = ?",
+                (payload, run_id),
+            )
+            return deepcopy(run.compute_request), deepcopy(run.compute_binding)
+
+    def persist_compute_release_request(
+        self,
+        run_id: str,
+        candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            row = self._connection.execute(
+                "SELECT payload FROM runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown run: {run_id}")
+            run = run_from_dict(json.loads(row[0]))
+            _validate_release_link(run, candidate)
+            if run.compute_release_request is not None:
+                if not _same_release_intent(run.compute_release_request, candidate):
+                    raise ValueError("compute release intent is immutable for a Run")
+                return deepcopy(run.compute_release_request)
+            run.compute_release_request = deepcopy(candidate)
+            payload = json.dumps(
+                run_to_dict(run),
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            self._connection.execute(
+                "UPDATE runs SET payload = ? WHERE run_id = ?",
+                (payload, run_id),
+            )
+            return deepcopy(run.compute_release_request)
 
     def close(self) -> None:
         self._connection.close()
