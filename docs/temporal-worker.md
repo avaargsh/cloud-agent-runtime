@@ -33,16 +33,19 @@ The workflow currently understands these Signals:
 - `resume_run`
 - `complete_run`
 - `fail_run`
+- `cancel_run`
+- `wait_for_input`
 
 It exposes the `run_state` Query for operational inspection.
 
-## Approval behavior
+## Approval and terminal behavior
 
-An approved event resumes the workflow phase.
+- An approved `approval_resolved` signal resumes a **waiting** Workflow to `running`. While manually `paused`, the approval decision and evidence are retained, but the Workflow remains paused until an explicit `resume_run` signal.
+- A denied approval transitions a nonterminal Workflow to terminal `failed`, retaining the decision reason and evidence.
+- Approval signals arriving **after a terminal Run** (`succeeded`, `failed`, or `cancelled`) are ignored; they cannot rewrite phase, result, error, or audit evidence.
+- Repeated nonterminal approval decisions with the same `approval_id` are deduplicated by the Workflow. Canonical approval authorization and durable decision state remain the Runtime/control-plane responsibility.
 
-A denied approval transitions the durable workflow to a terminal failed state.
-
-Evidence references carried with the approval are retained in workflow state.
+A `run_state` Query exposes both `phase` and `terminal`; consumers must check the actual phase, not just the terminal boolean.
 
 ## Start a Worker
 
