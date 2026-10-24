@@ -7,6 +7,22 @@ from pathlib import Path
 from uuid import uuid4
 
 from temporalio.testing import WorkflowEnvironment
+
+
+async def _start_cached_time_skipping():
+    """Reuse the Temporal test-server executable and retry transient rate limits."""
+    download_dir = Path.home() / ".cache" / "temporal-test-server"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    for attempt in range(4):
+        try:
+            return await WorkflowEnvironment.start_time_skipping(
+                download_dest_dir=str(download_dir)
+            )
+        except RuntimeError as exc:
+            if "429 Too Many Requests" not in str(exc) or attempt == 3:
+                raise
+            await asyncio.sleep(2 ** attempt)
+    raise AssertionError("unreachable Temporal test-server retry state")
 from temporalio.worker import Worker
 
 from cloud_agent_runtime import (
@@ -22,7 +38,7 @@ from cloud_agent_runtime.temporal_workflow import (
 
 def test_temporal_worker_signal_round_trip() -> None:
     async def scenario() -> None:
-        async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with await _start_cached_time_skipping() as env:
             task_queue = f"test-agent-runs-{uuid4()}"
 
             async with Worker(
@@ -101,7 +117,7 @@ def test_temporal_worker_signal_round_trip() -> None:
 
 def test_temporal_worker_restart_replays_history_and_deduplicates_signal() -> None:
     async def scenario() -> None:
-        async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with await _start_cached_time_skipping() as env:
             task_queue = f"test-agent-restart-{uuid4()}"
             workflow_id = f"agent-run-restart-{uuid4()}"
             payload = {
@@ -206,7 +222,7 @@ def test_temporal_worker_restart_replays_history_and_deduplicates_signal() -> No
 
 def test_temporal_run_timeout_is_durable_and_terminal() -> None:
     async def scenario() -> None:
-        async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with await _start_cached_time_skipping() as env:
             task_queue = f"test-agent-timeout-{uuid4()}"
             payload = {
                 "runtime_run_id": "canonical-run-timeout",
@@ -253,7 +269,7 @@ def test_temporal_run_timeout_is_durable_and_terminal() -> None:
 
 def test_run_budget_timeout_is_reconciled_after_temporal_execution_closes(tmp_path) -> None:
     async def scenario() -> None:
-        async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with await _start_cached_time_skipping() as env:
             task_queue = f"test-agent-budget-timeout-{uuid4()}"
             database = tmp_path / "budget-timeout.db"
             store = SQLiteStore(database)
@@ -330,7 +346,7 @@ def test_run_budget_timeout_is_reconciled_after_temporal_execution_closes(tmp_pa
 
 def test_temporal_deadline_survives_worker_restart_and_replay() -> None:
     async def scenario() -> None:
-        async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with await _start_cached_time_skipping() as env:
             task_queue = f"test-agent-timeout-restart-{uuid4()}"
             workflow_id = f"agent-run-timeout-restart-{uuid4()}"
             payload = {
@@ -479,7 +495,7 @@ def test_temporal_worker_process_sigkill_restarts_same_workflow_identity(tmp_pat
         )
 
     async def scenario() -> None:
-        async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with await _start_cached_time_skipping() as env:
             task_queue = f"test-agent-sigkill-{uuid4()}"
             workflow_id = f"agent-run-sigkill-{uuid4()}"
             runtime_run_id = f"canonical-run-{uuid4()}"
