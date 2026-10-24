@@ -29,6 +29,12 @@ Canonical Run ID
    -> canonical runtime state + artifact/evidence references
 ```
 
+## Temporal lifecycle safety
+
+Approved signals resume a waiting Workflow, but a manual pause requires an explicit resume; late approvals cannot mutate a terminal Workflow. `TemporalRunBridge.complete()` treats only a terminal `succeeded` Workflow as successful and rejects failed, cancelled or unknown terminal outcomes. These guards were merged through [#55](https://github.com/avaargsh/cloud-agent-runtime/pull/55) and [#56](https://github.com/avaargsh/cloud-agent-runtime/pull/56).
+
+See [Temporal Worker](docs/temporal-worker.md), [Temporal adapter](docs/temporal.md), and the [recovery evidence matrix](docs/recovery-matrix.md) for behavior, test links, and limitations. In particular, pre-upgrade production Workflow History replay is not yet proven.
+
 ## Recovery and persistence
 
 A sandbox is replaceable execution capacity. Its binding, provider reference, snapshot reference, replacement history, pending cleanup references and rebind idempotency key are recorded against the canonical Run. A replacement becomes canonical only after its binding is durably stored; cleanup of the retired sandbox happens after that commit. Failed or ambiguous cleanup remains pending until verified and reconciled.
