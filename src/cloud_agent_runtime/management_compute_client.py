@@ -699,11 +699,10 @@ class ManagementComputeClient:
                 cluster_id=cluster_id,
                 generation=expected_generation,
             )
-            if desired_before.get("deleting") is True:
-                raise ManagementRequestOutcomeUnknown(
-                    request_id,
-                    "Workload deletion is already in progress without this release receipt; refusing to adopt an unknown operation",
-                )
+            # This request already has a durable release key in Runtime.
+            # Replaying DELETE with that same key is safe: Management either
+            # returns its existing receipt or rejects a different operation's
+            # deletion under the generation fence.
             try:
                 status, _ = await self._request(
                     method="DELETE",
