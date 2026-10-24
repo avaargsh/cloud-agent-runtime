@@ -21,7 +21,10 @@ def test_real_subprocess_sigkill_after_temporal_acceptance_reconciles_sqlite(tmp
     async def scenario() -> None:
         db_path = tmp_path / "process-restart.sqlite"
         task_queue = f"p0-process-recovery-{uuid4()}"
-        async with await WorkflowEnvironment.start_time_skipping() as env:
+        # This recovery test uses real elapsed time; the legacy Java
+        # time-skipping test server is unnecessary and has a different
+        # lifecycle/transport behavior from a full Temporal server.
+        async with await WorkflowEnvironment.start_local() as env:
             target = env.client.service_client.config.target_host
             async with Worker(
                 env.client,
