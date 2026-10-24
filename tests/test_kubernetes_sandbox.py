@@ -51,7 +51,7 @@ class FakeKubectl:
                 "",
                 "",
             )
-        if args[:2] == ["delete", "namespace"]:
+        if args[:2] == ("delete", "namespace"):
             namespace = args[2]
             self.namespaces.discard(namespace)
             self.pods = {
