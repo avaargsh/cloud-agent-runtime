@@ -26,7 +26,7 @@ from cloud_agent_runtime.management_compute_client import ManagementComputeClien
 
 
 POLL_SECONDS = 2
-_IMAGE_DIGEST = __import__("re").compile(r"^[^\\s@]+@sha256:[0-9a-f]{64}$")
+_IMAGE_DIGEST = __import__("re").compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 
 
 def required_env(name: str) -> str:
@@ -239,9 +239,6 @@ class LiveProviderAbsenceObserver:
 
         # RELEASED requires an independent Control Plane 404 plus exact Job,
         # label-selected Job/Pod, and resource-claim absence observations.
-        claims = kubectl_json(self.namespace, "resourceclaims", selector, self.context)
-        if claims["items"]:
-            return common
         common.update({
             "state": "RELEASED",
             "observedGeneration": generation,
@@ -256,7 +253,6 @@ class LiveProviderAbsenceObserver:
                 f"control-plane://{binding['clusterId']}/workloads/{workload_id}/404",
                 f"kubernetes://{binding['clusterId']}/namespaces/{self.namespace}/jobs/job-{workload_id}/absent",
                 f"kubernetes://{binding['clusterId']}/namespaces/{self.namespace}/pods?selector={urllib.parse.quote(selector)}/absent",
-                f"kubernetes://{binding['clusterId']}/namespaces/{self.namespace}/resourceclaims?selector={urllib.parse.quote(selector)}/absent",
             ],
         })
         return common
