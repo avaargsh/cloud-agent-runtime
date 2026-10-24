@@ -135,9 +135,29 @@ def test_namespace_destruction_failure_is_retryable_and_idempotent():
         raise AssertionError("namespace deletion failure was reported as success")
     assert sandbox.status.value == "bound"
     assert ns in kubectl.namespaces
+    # A failed namespace deletion must not first remove the deny-all policy.
+    # Otherwise an orphan Pod/resource could run without its isolation boundary.
+    assert (ns, "default-deny-all") in kubectl.policies
+    assert (ns, sandbox_id) in kubectl.pods
     assert provider.is_gone(sandbox_id) is False
     result = provider.terminate(sandbox)
     assert result.sandbox_id == sandbox_id
     assert result.status.value == "terminated"
     assert ns not in kubectl.namespaces
     assert provider.is_gone(sandbox_id) is True
+
+
+
+def test_is_gone_requires_namespace_absence_not_only_pod_absence():
+    kubectl = FakeKubectl()
+    provider = KubernetesSandboxProvider(kubectl=kubectl)
+    sandbox = provider.allocate()
+    namespace = provider._namespace_for(sandbox.sandbox_id)
+
+    # Simulate a pod already deleted while its namespace and policy remain.
+    # That is not cleanup completion: namespace-scoped objects may still exist.
+    kubectl.pods.pop((namespace, sandbox.sandbox_id))
+
+    assert namespace in kubectl.namespaces
+    assert (namespace, "default-deny-all") in kubectl.policies
+    assert provider.is_gone(sandbox.sandbox_id) is False
