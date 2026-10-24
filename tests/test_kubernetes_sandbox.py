@@ -102,11 +102,15 @@ def test_terminate_is_orphan_cleanup_safe():
     # --ignore-not-found=true.
     provider.terminate(sandbox)
 
+    # The first terminate removes the Pod, deny policy and namespace.
+    # The second observes that the per-sandbox namespace is already Gone and
+    # must be idempotent without issuing redundant deletes.
     delete_calls = [args for args, _ in kubectl.calls if "delete" in args]
     assert [args[args.index("delete") + 1] for args in delete_calls] == [
-        "pod", "networkpolicy", "namespace", "pod", "networkpolicy", "namespace"
+        "pod", "networkpolicy", "namespace"
     ]
     assert all("--ignore-not-found=true" in args for args in delete_calls)
+    assert provider.is_gone(sandbox.sandbox_id) is True
 
 
 
