@@ -52,7 +52,16 @@ class ComputeResourceClient(Protocol):
         ...
 
 
-def _validate_binding(binding: Mapping[str, Any]) -> dict[str, Any]:
+def _validate_binding(
+    binding: Mapping[str, Any],
+    *,
+    project_id: str,
+    compute_pool_id: str,
+) -> dict[str, Any]:
+    if binding.get("projectId") != project_id:
+        raise ValueError("trusted ComputePool binding projectId does not match ComputeRequest")
+    if binding.get("computePoolId") != compute_pool_id:
+        raise ValueError("trusted ComputePool binding poolId does not match ComputeRequest")
     cluster_id = binding.get("clusterId")
     provider = binding.get("provider")
     generation = binding.get("providerBindingGeneration")
@@ -65,6 +74,8 @@ def _validate_binding(binding: Mapping[str, Any]) -> dict[str, Any]:
     # Persist only the contract's stable route identity, not credentials or
     # transient resolver data.
     return {
+        "projectId": project_id,
+        "computePoolId": compute_pool_id,
         "clusterId": cluster_id,
         "provider": provider,
         "providerBindingGeneration": generation,
@@ -309,7 +320,11 @@ class ExecutionProfileRouter:
                     "persisted ComputeRequest has no frozen Pool-to-Cluster route binding"
                 )
             request_id = stored_id
-            candidate_binding = _validate_binding(run.compute_binding)
+            candidate_binding = _validate_binding(
+                run.compute_binding,
+                project_id=str(profile["projectId"]),
+                compute_pool_id=compute_pool_id,
+            )
         else:
             # Resolve the trusted route before side effects. Its first value is
             # committed atomically with the request ID and must be reused after
@@ -318,7 +333,9 @@ class ExecutionProfileRouter:
                 await self.compute_client.resolve_binding(
                     project_id=str(profile["projectId"]),
                     compute_pool_id=compute_pool_id,
-                )
+                ),
+                project_id=str(profile["projectId"]),
+                compute_pool_id=compute_pool_id,
             )
             request_id = secrets.token_hex(16)
 
@@ -342,7 +359,11 @@ class ExecutionProfileRouter:
 
         # Concurrent first dispatches can resolve different routes; the
         # atomic winner's binding must be used by every loser/retry.
-        binding = _validate_binding(binding)
+        binding = _validate_binding(
+            binding,
+            project_id=str(profile["projectId"]),
+            compute_pool_id=compute_pool_id,
+        )
         allocation = await self.compute_client.submit_or_reconcile(
             copy.deepcopy(request),
             binding=copy.deepcopy(binding),
