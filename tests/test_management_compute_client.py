@@ -25,13 +25,17 @@ class MemoryAuthority:
 
 
 class MemoryBindingResolver:
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def resolve(self, *, project_id: str, compute_pool_id: str) -> dict[str, Any]:
+        self.calls += 1
         assert project_id == "project-a"
         assert compute_pool_id == "pool-a"
         return {
-            "clusterId": "cluster-a",
+            "clusterId": "cluster-a" if self.calls == 1 else "cluster-b",
             "provider": "kueue",
-            "providerBindingGeneration": 2,
+            "providerBindingGeneration": self.calls,
         }
 
 
@@ -174,14 +178,17 @@ def test_management_client_uses_public_route_and_server_receipt() -> None:
     async def scenario() -> None:
         server = LocalManagementServer()
         try:
+            resolver = MemoryBindingResolver()
             client = ManagementComputeClient(
                 base_url=server.base_url,
                 token_provider=MemoryAuthority(),
-                binding_resolver=MemoryBindingResolver(),
+                binding_resolver=resolver,
                 allow_loopback_http=True,
                 timeout_seconds=2,
             )
-            allocation = await client.submit_or_reconcile(request())
+            binding = await client.resolve_binding(project_id="project-a", compute_pool_id="pool-a")
+            allocation = await client.submit_or_reconcile(request(), binding=binding)
+            assert resolver.calls == 1
 
             assert server.put_count == 1
             assert server.receipt is not None
@@ -208,14 +215,17 @@ def test_management_client_recovers_commit_after_lost_ack_without_second_put() -
     async def scenario() -> None:
         server = LocalManagementServer(drop_first_put_ack=True)
         try:
+            resolver = MemoryBindingResolver()
             client = ManagementComputeClient(
                 base_url=server.base_url,
                 token_provider=MemoryAuthority(),
-                binding_resolver=MemoryBindingResolver(),
+                binding_resolver=resolver,
                 allow_loopback_http=True,
                 timeout_seconds=2,
             )
-            result = await client.submit_or_reconcile(request())
+            binding = await client.resolve_binding(project_id="project-a", compute_pool_id="pool-a")
+            result = await client.submit_or_reconcile(request(), binding=binding)
+            assert resolver.calls == 1
             assert result["state"] == "REQUESTED"
             assert result["generation"] == 1
             assert server.put_count == 1, "receipt recovery must not issue a second PUT"
@@ -238,15 +248,17 @@ def test_management_client_refuses_mutable_image_and_non_loopback_plain_http() -
                 )
             invalid = request()
             invalid["workload"]["image"] = "registry.example.test/model:latest"
+            resolver = MemoryBindingResolver()
             client = ManagementComputeClient(
                 base_url=server.base_url,
                 token_provider=MemoryAuthority(),
-                binding_resolver=MemoryBindingResolver(),
+                binding_resolver=resolver,
                 allow_loopback_http=True,
                 timeout_seconds=2,
             )
+            binding = await client.resolve_binding(project_id="project-a", compute_pool_id="pool-a")
             with pytest.raises(ValueError, match="sha256"):
-                await client.submit_or_reconcile(invalid)
+                await client.submit_or_reconcile(invalid, binding=binding)
             assert server.put_count == 0
         finally:
             server.close()
@@ -274,22 +286,27 @@ def test_management_client_stops_after_unknown_commit_and_uses_same_key_on_retry
 
         server.server.RequestHandlerClass.do_GET = get_with_temporary_outage
         try:
+            resolver = MemoryBindingResolver()
             client = ManagementComputeClient(
                 base_url=server.base_url,
                 token_provider=MemoryAuthority(),
-                binding_resolver=MemoryBindingResolver(),
+                binding_resolver=resolver,
                 allow_loopback_http=True,
                 timeout_seconds=2,
             )
+            binding = await client.resolve_binding(project_id="project-a", compute_pool_id="pool-a")
             with pytest.raises(ManagementRequestOutcomeUnknown):
-                await client.submit_or_reconcile(request())
+                await client.submit_or_reconcile(request(), binding=binding)
             assert server.put_count == 1
             # Restore receipt endpoint and retry. The same request ID finds the
-            # immutable receipt first and returns REQUESTED without PUT.
+            # immutable receipt first and returns REQUESTED without PUT, still
+            # pinned to the originally persisted Pool -> Cluster route.
             server.server.RequestHandlerClass.do_GET = original
-            result = await client.submit_or_reconcile(request())
+            result = await client.submit_or_reconcile(request(), binding=binding)
             assert result["requestId"] == "a" * 32
             assert server.put_count == 1
+            assert resolver.calls == 1
+            assert result["clusterId"] == "cluster-a"
         finally:
             server.close()
 
