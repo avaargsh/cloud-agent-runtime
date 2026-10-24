@@ -639,7 +639,7 @@ def test_temporal_worker_process_sigkill_restarts_same_workflow_identity(tmp_pat
                 )
                 evidence_dir.mkdir(parents=True, exist_ok=True)
                 (evidence_dir / "temporal-worker-sigkill-evidence.json").write_text(
-                    json.dumps(evidence, indent=2, sort_keys=True) + "\\n",
+                    json.dumps(evidence, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8",
                 )
             finally:
