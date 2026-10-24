@@ -1,6 +1,6 @@
 # Authoritative workload credential and approval integration
 
-Status: **adapter contract / blocked on authority-service implementation**. The Runtime client in this PR is not itself a credential issuer and does not create real upstream credentials.
+Status: **Runtime adapter plus paired ACP authority implementation are available in Draft PRs #52 and #237; source-level acceptance is green, production deployment remains blocked.** The Runtime client in this PR is not itself a credential issuer and does not create real upstream credentials.
 
 ## Trust boundaries
 
@@ -11,7 +11,7 @@ Status: **adapter contract / blocked on authority-service implementation**. The 
 
 ## Versioned service contract
 
-The following API is a contract that the authority service must implement; it is not claimed to exist in the current ACP repository yet. JSON responses must be objects, and all times are Unix seconds in UTC.
+The paired ACP authority implementation and PostgreSQL/HTTPS/cross-repository integration tests are in PR #237. This contract remains versioned here to define caller behavior; current-head CI is necessary but not evidence of production deployment. JSON responses must be objects, and all times are Unix seconds in UTC.
 
 ### POST /v1/workload-credentials:issue
 
@@ -34,7 +34,7 @@ Return credential.active, authoritative audience/scopes/expiry, and the canonica
 
 - POST /v1/workload-credentials:revoke — request credential_id; return revoked: bool.
 - POST /v1/workload-credentials:revoke-run — request run_id; return non-negative revoked_count. Bind the caller to a trusted Runtime service identity.
-- POST /v1/workload-credentials:revoke-approval — request approval_id and stable event_id; return non-negative revoked_count. This operation must be idempotent by event ID.
+- POST /v1/workload-credentials:revoke-approval — requires the dedicated `approval.revoker` role; request approval_id and stable event_id; return non-negative revoked_count. This operation must be idempotent by event ID. The `credential.revoker` role must not revoke approval state.
 
 Run pause/resume/rebind/completion/cancellation revoke Run leases. A new sandbox revision gets new workload assertions and leases. The previous token must fail introspection after revocation even if it has not reached its nominal expiry.
 
@@ -52,7 +52,7 @@ Request: a unique event_id from a trusted, authenticated approval-outbox deliver
 - HTTP 409 on the issuance endpoint maps to replay rejection; issuance POSTs are not blindly retried after ambiguous timeout. The caller reconciles the same request ID via the authority's audit/query mechanism.
 - The revocation event consumer must authenticate the source (signature or mutually authenticated trusted outbox); a non-empty source string is not authentication. The library requires an injected ApprovalRevocationEventVerifier.
 - The authority service needs a transactional durable database/ledger, uniqueness constraints, revocation status/version, an outbox, least-privilege DB roles, audit evidence and backup/restore tests. Its operator keys and policy store are not controlled by Agent Runtime.
-- This repository includes client adapters and synthetic transport tests only. The linked ACP issue must deliver the service, schema, operator provisioning, signed assertion issuer/verifier, durable replay handling, real approval/revocation outbox and real HTTP integration tests before any production GO.
+- The paired ACP PR #237 includes the service, schema, validated operator configuration, signed assertion verifier, durable replay handling, transactional approval-revocation outbox, and PostgreSQL/HTTPS/cross-repository integration tests. Production GO still requires deployment evidence for signer/key lifecycle, service authentication and mTLS, trusted revocation delivery, and protected-resource online introspection/fencing.
 
 ## Current ACP dependency
 
