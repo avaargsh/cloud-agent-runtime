@@ -5,6 +5,9 @@ on:
   pull_request:
     paths:
       - "src/cloud_agent_runtime/**"
+      - "tests/test_temporal_driver.py"
+      - "tests/test_temporal_process_recovery.py"
+      - "tests/test_temporal_ack_drop_proxy.py"
       - "scripts/kind-temporal-evidence-golden.py"
       - ".github/workflows/agentos-v32-golden.yml"
 
