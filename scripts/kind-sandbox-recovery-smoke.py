@@ -24,6 +24,7 @@ run_id = run.run_id
 workflow_ref = run.workflow_ref
 sandbox_a_ref = run.sandbox_ref
 sandbox_a_id = runtime._sandboxes[run_id].sandbox_id
+sandbox_a_namespace = provider._namespace_for(sandbox_a_id)
 
 active = runtime._sandboxes[run_id]
 checkpoint = provider.snapshot(active).snapshot_ref
@@ -35,6 +36,7 @@ assert active.status.value == "terminated"
 
 rebound = runtime.rebind_run_sandbox(run_id, snapshot_ref=checkpoint)
 sandbox_b_id = runtime._sandboxes[run_id].sandbox_id
+sandbox_b_namespace = provider._namespace_for(sandbox_b_id)
 assert rebound.run_id == run_id
 assert rebound.workflow_ref == workflow_ref
 assert rebound.sandbox_ref != sandbox_a_ref
