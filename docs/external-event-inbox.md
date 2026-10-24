@@ -60,8 +60,11 @@ confirmed = await dispatcher.deliver_pending(
 )
 ```
 
-For each unacknowledged event, the dispatcher resolves the **persisted**
-Temporal Workflow ID and execution Run ID (not caller-supplied IDs), verifies
+For each unacknowledged event, the dispatcher requires a **persisted, nonempty**
+Temporal Workflow ID **and execution Run ID**, not caller-supplied IDs. An older
+Run without a pinned provider execution ID must be reconciled through a trusted
+provider observation step first; dispatch fails closed rather than signalling an
+unscoped workflow handle. The dispatcher verifies
 that the server-reported canonical Run and Session match, and then checks for
 the exact immutable event payload in `run_state.external_events` **before**
 attempting another Signal. New events are signalled as

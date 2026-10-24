@@ -8,6 +8,7 @@ from cloud_agent_runtime.event_inbox import EventConflictError, EventEnvelope, S
 from cloud_agent_runtime.models import Run, RunStatus, Session
 from cloud_agent_runtime.store import SQLiteStore
 from cloud_agent_runtime.workflow import WorkflowRef
+from cloud_agent_runtime.workflow import WorkflowRef
 
 
 def seeded_inbox(tmp_path):
@@ -167,6 +168,31 @@ def test_unbound_run_or_cross_tenant_cannot_dispatch(tmp_path):
     for run_id, tenant_id in (("run-a", "tenant-b"), ("run-b", "tenant-b")):
         with pytest.raises(PermissionError):
             asyncio.run(dispatcher.deliver_pending(run_id=run_id, tenant_id=tenant_id))
+    assert driver.signals == []
+    assert inbox.list_pending(run_id="run-a", tenant_id="tenant-a") == [event]
+    inbox.close()
+    store.close()
+
+
+@pytest.mark.parametrize("run_id", [None, "", " "])
+def test_unpinned_temporal_execution_is_rejected_before_signal(tmp_path, run_id):
+    """A logical workflow ID alone must not authorize an execution Signal."""
+    store, inbox, event, _ = seeded_inbox(tmp_path)
+    original = store.get_run("run-a")
+    original.workflow_ref = WorkflowRef(
+        provider="temporal",
+        workflow_id="agent-run-run-a",
+        run_id=run_id,
+    )
+    store.save_run(original)
+
+    driver = FakeTemporalDriver()
+    with pytest.raises(PermissionError, match="binding is unavailable"):
+        asyncio.run(
+            TemporalEventDispatcher(inbox, driver).deliver_pending(
+                run_id="run-a", tenant_id="tenant-a"
+            )
+        )
     assert driver.signals == []
     assert inbox.list_pending(run_id="run-a", tenant_id="tenant-a") == [event]
     inbox.close()

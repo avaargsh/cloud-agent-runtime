@@ -163,13 +163,8 @@ class SQLiteEventInbox:
             or binding.get("provider") != "temporal"
             or not isinstance(binding.get("workflow_id"), str)
             or not binding["workflow_id"].strip()
-            or (
-                binding.get("run_id") is not None
-                and (
-                    not isinstance(binding["run_id"], str)
-                    or not binding["run_id"].strip()
-                )
-            )
+            or not isinstance(binding.get("run_id"), str)
+            or not binding["run_id"].strip()
         ):
             raise PermissionError("canonical Temporal workflow binding is unavailable")
         return WorkflowRef(**binding), run["session_id"]
