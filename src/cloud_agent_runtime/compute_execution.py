@@ -344,6 +344,10 @@ class ExecutionProfileRouter:
             raise TypeError(
                 "RuntimeStore must implement atomic persist_compute_request for GPU retries"
             )
+        if not callable(getattr(store, "persist_compute_release_request", None)):
+            raise TypeError(
+                "RuntimeStore must implement atomic persist_compute_release_request for release recovery"
+            )
         self.store = store
         self.compute_client = compute_client
 
