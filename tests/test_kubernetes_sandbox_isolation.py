@@ -3,7 +3,7 @@ from subprocess import CompletedProcess
 
 import pytest
 
-from cloud_agent_runtime import AgentRuntime, SQLiteStore
+from cloud_agent_runtime import AgentRuntime, InMemoryStore, SQLiteStore
 from cloud_agent_runtime.kubernetes_sandbox import KubectlResult, KubernetesSandboxProvider
 from cloud_agent_runtime.store import SandboxAllocationIntent
 
@@ -227,10 +227,13 @@ def test_failed_allocation_cleanup_survives_store_reopen(tmp_path):
     reopened = SQLiteStore(database)
     # Runtime startup retries the exact durable cleanup identity. It removes
     # the intent only after independently observing Namespace absence.
-    AgentRuntime(store=reopened, sandbox_provider=provider)
+    recovered_runtime = AgentRuntime(store=reopened, sandbox_provider=provider)
     assert namespace not in kubectl.namespaces
     assert provider.is_gone(intent.sandbox_id) is True
     assert reopened.list_allocation_intents() == []
+    # A second reconciliation is an idempotent no-op after the durable intent
+    # was cleared; it cannot delete or otherwise mutate an unrelated resource.
+    assert recovered_runtime.reconcile_sandbox_allocation_intents() == 0
     reopened.close()
 
 
@@ -268,3 +271,45 @@ def test_recent_allocation_intent_is_not_misclassified_as_orphan(tmp_path):
     )
     provider.terminate(sandbox)
     runtime.store.close()
+
+
+
+def test_recoverable_provider_fails_closed_without_intent_store_contract():
+    class LegacyStore:
+        """Pre-intent RuntimeStore wrapper that deliberately omits new methods."""
+
+        def __init__(self):
+            self.inner = InMemoryStore()
+
+        def __getattr__(self, name):
+            if name in {
+                "save_allocation_intent",
+                "list_allocation_intents",
+                "delete_allocation_intent",
+            }:
+                raise AttributeError(name)
+            return getattr(self.inner, name)
+
+    kubectl = FakeKubectl()
+    provider = KubernetesSandboxProvider(kubectl=kubectl)
+    runtime = AgentRuntime(
+        store=LegacyStore(),
+        sandbox_provider=provider,
+    )
+    session = runtime.create_session(
+        agent_id="coding-agent",
+        release_id="coding-agent-v1",
+        tenant_id="tenant-a",
+    )
+
+    with pytest.raises(RuntimeError, match="durable Sandbox allocation intents"):
+        runtime.start_run(session_id=session.session_id)
+
+    # Fail before any Namespace or Pod side effect, rather than silently
+    # falling back to allocate() and losing the cleanup owner on a crash.
+    assert not kubectl.namespaces
+    assert not kubectl.pods
+    assert not any(
+        args[:2] == ("create", "namespace")
+        for args, _ in kubectl.calls
+    )
