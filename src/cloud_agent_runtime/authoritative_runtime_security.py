@@ -34,12 +34,14 @@ class RoleRoutedAuthorityTransport:
         issuer: JsonAuthorityTransport,
         introspector: JsonAuthorityTransport,
         revoker: JsonAuthorityTransport,
+        approval_revoker: JsonAuthorityTransport,
     ) -> None:
-        if len({id(issuer), id(introspector), id(revoker)}) != 3:
-            raise ValueError("issue, introspection, and revocation transports must be distinct")
+        if len({id(issuer), id(introspector), id(revoker), id(approval_revoker)}) != 4:
+            raise ValueError("issue, introspection, credential revocation, and approval revocation transports must be distinct")
         self._issuer = issuer
         self._introspector = introspector
         self._revoker = revoker
+        self._approval_revoker = approval_revoker
 
     def request(self, method, path, body=None):
         if method == "POST" and path == "/v1/workload-credentials:issue":
@@ -49,9 +51,10 @@ class RoleRoutedAuthorityTransport:
         if method == "POST" and path in {
             "/v1/workload-credentials:revoke",
             "/v1/workload-credentials:revoke-run",
-            "/v1/workload-credentials:revoke-approval",
         }:
             return self._revoker.request(method, path, body)
+        if method == "POST" and path == "/v1/workload-credentials:revoke-approval":
+            return self._approval_revoker.request(method, path, body)
         raise RuntimeError("authoritative request is not assigned to a service role")
 
 
@@ -172,6 +175,7 @@ def build_authoritative_runtime_security(
         issuer=issue_transport,
         introspector=introspection_transport,
         revoker=revocation_transport,
+        approval_revoker=approval_revocation_transport,
     )
     broker = AuthoritativeCredentialBroker(
         transport=routed_broker_transport,
