@@ -647,13 +647,59 @@ class AgentRuntime:
         # side effect is created.
         try:
             self.store.save_run(run)
-        except Exception:
-            if owned_sandbox is not None:
-                if allocation_intent is not None:
-                    self._mark_allocation_cleanup_pending(allocation_intent)
+        except Exception as save_error:
+            if owned_sandbox is None:
+                raise
+
+            if allocation_intent is None:
+                # Legacy Providers do not expose a durable allocation intent,
+                # so retain the pre-existing best-effort cleanup behavior.
                 self._best_effort_terminate(owned_sandbox)
                 self._sandboxes.pop(run_id, None)
-            raise
+                raise
+
+            # A database/API error may mean the save did not commit, or that
+            # it committed but its acknowledgement was lost. Preserve the
+            # cleanup identity before reading canonical state.
+            self._mark_allocation_cleanup_pending(allocation_intent)
+            try:
+                persisted = self.store.get_run(run_id)
+            except KeyError:
+                # The authoritative read succeeded and confirmed no Run was
+                # committed, so this allocated Sandbox is an orphan.
+                self._best_effort_terminate(owned_sandbox)
+                self._sandboxes.pop(run_id, None)
+                raise save_error
+            except Exception:
+                # The save outcome is unknown while the canonical store is
+                # unavailable. Do not guess by destroying a possibly-owned
+                # workspace; leave the resource and durable intent for retry.
+                raise save_error
+
+            expected_binding = run.sandbox_binding
+            persisted_binding = getattr(persisted, "sandbox_binding", None)
+            same_canonical_binding = (
+                getattr(persisted, "run_id", None) == run.run_id
+                and getattr(persisted, "session_id", None) == run.session_id
+                and getattr(persisted, "sandbox_ref", None) == run.sandbox_ref
+                and expected_binding is not None
+                and persisted_binding is not None
+                and getattr(persisted_binding, "provider", None) == expected_binding.provider
+                and getattr(persisted_binding, "sandbox_id", None) == expected_binding.sandbox_id
+                and getattr(persisted_binding, "sandbox_ref", None) == expected_binding.sandbox_ref
+                and getattr(persisted_binding, "revision", None) == expected_binding.revision
+            )
+            if not same_canonical_binding:
+                # The failed write did not establish this Run/Sandbox binding;
+                # clean up only the Sandbox created by this request.
+                self._best_effort_terminate(owned_sandbox)
+                self._sandboxes.pop(run_id, None)
+                raise save_error
+
+            # The authoritative read proves save_run committed despite the
+            # ambiguous acknowledgement. Continue as the successful path, so
+            # we neither destroy the bound Sandbox nor start a duplicate Run.
+            run = persisted
 
         if allocation_intent is not None:
             # The canonical Run now owns the Sandbox. If this deletion fails or
