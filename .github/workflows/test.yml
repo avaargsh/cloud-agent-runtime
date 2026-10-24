@@ -27,4 +27,6 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install -U pip
       - run: pip install -e ".[dev]"
+      - name: Syntax-check opt-in real Management release harness
+        run: python -m py_compile scripts/e2e/compute-release-real-stack.py
       - run: pytest -vv -ra
