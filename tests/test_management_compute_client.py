@@ -455,3 +455,174 @@ def test_management_client_rejects_receipt_digest_for_another_mutation() -> None
             server.close()
 
     asyncio.run(scenario())
+
+
+def release_request() -> dict[str, Any]:
+    document = {
+        "apiVersion": "compute.release-request/v0.1",
+        "requestId": "c" * 32,
+        "sourceRequestId": request()["requestId"],
+        "projectId": "project-a",
+        "computePoolId": "pool-a",
+        "workloadId": request()["workload"]["id"],
+        "expectedGeneration": 1,
+        "correlation": request()["correlation"],
+    }
+    canonical = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    document["intentDigest"] = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return document
+
+
+def test_management_client_release_uses_distinct_key_and_exact_if_match() -> None:
+    async def scenario() -> None:
+        server = LocalManagementServer()
+        try:
+            client = ManagementComputeClient(
+                base_url=server.base_url,
+                token_provider=MemoryAuthority(),
+                binding_resolver=MemoryBindingResolver(),
+                allow_loopback_http=True,
+                timeout_seconds=2,
+            )
+            binding = await client.resolve_binding(project_id="project-a", compute_pool_id="pool-a")
+            create = request()
+            allocation = await client.submit_or_reconcile(create, binding=binding)
+            release = release_request()
+            result = await client.release_or_reconcile(release, request=create, binding=binding)
+
+            assert result["state"] == "RELEASING"
+            assert result["requestId"] == create["requestId"]
+            assert result["requestId"] != release["requestId"]
+            assert server.delete_count == 1
+            delete = next(item for item in server.requests if item["method"] == "DELETE")
+            assert delete["request_id"] == release["requestId"]
+            assert delete["if_match"] == '"1"'
+            receipt = server.receipts[release["requestId"]]
+            assert receipt["action"] == "delete-request"
+            assert receipt["expectedGeneration"] == allocation["generation"] == 1
+            assert receipt["requestDigest"] == server_delete_fingerprint("run-123", 1)
+        finally:
+            server.close()
+
+    asyncio.run(scenario())
+
+
+def test_management_client_release_recovers_lost_ack_without_second_delete() -> None:
+    async def scenario() -> None:
+        server = LocalManagementServer(drop_first_delete_ack=True)
+        try:
+            client = ManagementComputeClient(
+                base_url=server.base_url,
+                token_provider=MemoryAuthority(),
+                binding_resolver=MemoryBindingResolver(),
+                allow_loopback_http=True,
+                timeout_seconds=2,
+            )
+            binding = await client.resolve_binding(project_id="project-a", compute_pool_id="pool-a")
+            create = request()
+            await client.submit_or_reconcile(create, binding=binding)
+            release = release_request()
+
+            recovered = await client.release_or_reconcile(release, request=create, binding=binding)
+            assert recovered["state"] == "RELEASING"
+            assert server.delete_count == 1
+            assert server.receipts[release["requestId"]]["action"] == "delete-request"
+
+            replayed = await client.release_or_reconcile(release, request=create, binding=binding)
+            assert replayed["state"] == "RELEASING"
+            assert replayed["requestId"] == create["requestId"]
+            assert server.delete_count == 1  # receipt recovery avoids a second DELETE
+        finally:
+            server.close()
+
+    asyncio.run(scenario())
+
+
+def test_management_client_release_rejects_receipt_digest_mismatch() -> None:
+    async def scenario() -> None:
+        server = LocalManagementServer(release_digest_override="f" * 64)
+        try:
+            client = ManagementComputeClient(
+                base_url=server.base_url,
+                token_provider=MemoryAuthority(),
+                binding_resolver=MemoryBindingResolver(),
+                allow_loopback_http=True,
+                timeout_seconds=2,
+            )
+            binding = await client.resolve_binding(project_id="project-a", compute_pool_id="pool-a")
+            create = request()
+            await client.submit_or_reconcile(create, binding=binding)
+            with pytest.raises(ManagementProtocolError, match="requestDigest does not match"):
+                await client.release_or_reconcile(release_request(), request=create, binding=binding)
+        finally:
+            server.close()
+
+    asyncio.run(scenario())
+
+
+def test_management_client_release_stale_generation_never_deletes() -> None:
+    async def scenario() -> None:
+        from cloud_agent_runtime.management_compute_client import ManagementRequestRejected
+
+        server = LocalManagementServer()
+        try:
+            client = ManagementComputeClient(
+                base_url=server.base_url,
+                token_provider=MemoryAuthority(),
+                binding_resolver=MemoryBindingResolver(),
+                allow_loopback_http=True,
+                timeout_seconds=2,
+            )
+            binding = await client.resolve_binding(project_id="project-a", compute_pool_id="pool-a")
+            await client.submit_or_reconcile(request(), binding=binding)
+            assert server.desired is not None
+            server.desired["generation"] = 2
+            with pytest.raises(ManagementRequestRejected) as error:
+                await client.release_or_reconcile(release_request(), request=request(), binding=binding)
+            assert error.value.status == 412
+            assert server.delete_count == 0
+        finally:
+            server.close()
+
+    asyncio.run(scenario())
+
+
+def test_management_client_never_claims_released_while_desired_exists() -> None:
+    class DishonestReleaseObserver:
+        async def observe(self, *, request: dict[str, Any], binding: dict[str, Any], receipt: dict[str, Any], desired: dict[str, Any] | None) -> dict[str, Any]:
+            return {
+                "requestId": request["requestId"],
+                "projectId": request["projectId"],
+                "computePoolId": request["computePoolId"],
+                "workloadId": request["workload"]["id"],
+                "generation": 1,
+                "clusterId": binding["clusterId"],
+                "provider": binding["provider"],
+                "providerBindingGeneration": binding["providerBindingGeneration"],
+                "observedGeneration": 1,
+                "state": "RELEASED",
+                "providerRefs": [],
+                "conditions": [{"type": "CleanupComplete", "status": "TRUE"}],
+                "evidenceRefs": ["evidence://cleanup"],
+            }
+
+    async def scenario() -> None:
+        server = LocalManagementServer()
+        try:
+            client = ManagementComputeClient(
+                base_url=server.base_url,
+                token_provider=MemoryAuthority(),
+                binding_resolver=MemoryBindingResolver(),
+                observer=DishonestReleaseObserver(),
+                allow_loopback_http=True,
+                timeout_seconds=2,
+            )
+            binding = await client.resolve_binding(project_id="project-a", compute_pool_id="pool-a")
+            create = request()
+            await client.submit_or_reconcile(create, binding=binding)
+            with pytest.raises(ManagementProtocolError, match="Desired Workload still exists"):
+                await client.release_or_reconcile(release_request(), request=create, binding=binding)
+        finally:
+            server.close()
+
+    asyncio.run(scenario())
