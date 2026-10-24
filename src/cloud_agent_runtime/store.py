@@ -41,8 +41,14 @@ def _same_compute_intent(left: dict[str, Any], right: dict[str, Any]) -> bool:
     # requestId and intentDigest are generated from the first committed intent.
     # Racing retries may build different candidates; compare the logical intent
     # and always return the first stored request/idempotency key.
-    left_intent = {key: value for key, value in left.items() if key not in {"requestId", "intentDigest"}}
-    right_intent = {key: value for key, value in right.items() if key not in {"requestId", "intentDigest"}}
+    left_intent = {
+        key: value for key, value in left.items()
+        if key not in {"requestId", "intentDigest"}
+    }
+    right_intent = {
+        key: value for key, value in right.items()
+        if key not in {"requestId", "intentDigest"}
+    }
     return left_intent == right_intent
 
 
