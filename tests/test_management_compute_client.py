@@ -50,6 +50,28 @@ def server_mutation_fingerprint(body: dict[str, Any], workload_id: str) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def server_delete_fingerprint(workload_id: str, generation: int) -> str:
+    payload = {
+        "method": "DELETE",
+        "cluster": "cluster-a",
+        "project": "project-a",
+        "kind": "Workload",
+        "resourceId": workload_id,
+        "expectedGeneration": generation,
+        "poolId": "",
+    }
+    encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    for plain, escaped in (
+        ("&", r"\u0026"),
+        ("<", r"\u003c"),
+        (">", r"\u003e"),
+        ("\u2028", r"\u2028"),
+        ("\u2029", r"\u2029"),
+    ):
+        encoded = encoded.replace(plain, escaped)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 class MemoryAuthority:
     async def access_token_for_project(self, project_id: str) -> str:
         assert project_id == "project-a"
@@ -76,12 +98,18 @@ class LocalManagementServer:
         self,
         *,
         drop_first_put_ack: bool = False,
+        drop_first_delete_ack: bool = False,
         receipt_digest_override: str | None = None,
+        release_digest_override: str | None = None,
     ) -> None:
         self.drop_first_put_ack = drop_first_put_ack
+        self.drop_first_delete_ack = drop_first_delete_ack
         self.receipt_digest_override = receipt_digest_override
+        self.release_digest_override = release_digest_override
         self.put_count = 0
+        self.delete_count = 0
         self.receipt: dict[str, Any] | None = None
+        self.receipts: dict[str, dict[str, Any]] = {}
         self.desired: dict[str, Any] | None = None
         self.requests: list[dict[str, Any]] = []
         owner = self
@@ -105,12 +133,14 @@ class LocalManagementServer:
                     "authorization": self.headers.get("Authorization"),
                 })
                 if "/operations/" in self.path:
-                    if owner.receipt is None:
+                    request_id = self.path.rsplit("/", 1)[1]
+                    receipt = owner.receipts.get(request_id)
+                    if receipt is None:
                         self.send_response(404)
                         self.send_header("Content-Length", "0")
                         self.end_headers()
                         return
-                    self._json(200, owner.receipt)
+                    self._json(200, receipt)
                     return
                 if "/resources/Workload/" in self.path:
                     if owner.desired is None:
@@ -152,6 +182,7 @@ class LocalManagementServer:
                     "requestDigest": owner.receipt_digest_override or server_mutation_fingerprint(body, workload_id),
                     "committedAt": "2026-10-24T00:00:00Z",
                 }
+                owner.receipts[request_id] = owner.receipt
                 owner.desired = {
                     "id": workload_id,
                     "clusterId": "cluster-a",
@@ -175,6 +206,60 @@ class LocalManagementServer:
                     self.connection.close()
                     return
                 self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def do_DELETE(self) -> None:  # noqa: N802
+                owner.delete_count += 1
+                request_id = self.headers.get("Idempotency-Key")
+                if_match = self.headers.get("If-Match")
+                owner.requests.append({
+                    "method": "DELETE",
+                    "path": self.path,
+                    "authorization": self.headers.get("Authorization"),
+                    "request_id": request_id,
+                    "if_match": if_match,
+                })
+                assert self.headers.get("Authorization") == "Bearer short-lived-test-access-token"
+                assert request_id and len(request_id) == 32
+                if owner.desired is None:
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                generation = owner.desired["generation"]
+                if if_match != f'"{generation}"':
+                    self.send_response(412)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                workload_id = self.path.rsplit("/", 1)[1]
+                receipt = {
+                    "requestId": request_id,
+                    "status": "desired-committed",
+                    "clusterId": "cluster-a",
+                    "projectId": "project-a",
+                    "kind": "Workload",
+                    "resourceId": workload_id,
+                    "action": "delete-request",
+                    "expectedGeneration": generation,
+                    "resultingGeneration": generation,
+                    "requestDigest": owner.release_digest_override or server_delete_fingerprint(workload_id, generation),
+                    "committedAt": "2026-10-24T00:05:00Z",
+                }
+                owner.receipts[request_id] = receipt
+                owner.desired["deleting"] = True
+                if owner.drop_first_delete_ack and owner.delete_count == 1:
+                    # The server commits the delete request receipt then drops
+                    # the response, reproducing a mutation ACK lost after commit.
+                    self.close_connection = True
+                    try:
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    self.connection.close()
+                    return
+                self.send_response(202)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
 
