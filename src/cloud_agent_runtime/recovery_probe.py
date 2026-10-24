@@ -120,9 +120,7 @@ async def _reconcile_sqlite(args) -> None:
         sandbox_provider=InMemorySandboxProvider(),
         workflow_driver=driver,
     )
-    print("[DEBUG-temporal-reconcile-close] before-reconcile", file=sys.stderr, flush=True)
     run = await runtime.reconcile_run(args.run_id)
-    print("[DEBUG-temporal-reconcile-close] after-reconcile", file=sys.stderr, flush=True)
     print(json.dumps({
         "run_id": run.run_id,
         "status": run.status.value,
@@ -140,17 +138,12 @@ async def _reconcile_sqlite(args) -> None:
         # one-shot Temporal client. Keep its SDK runtime active until the parent
         # has checked the recovered state and explicitly tears down the probe.
         await asyncio.Event().wait()
-    print("[DEBUG-temporal-reconcile-close] before-store-close", file=sys.stderr, flush=True)
     store.close()
-    print("[DEBUG-temporal-reconcile-close] after-store-close", file=sys.stderr, flush=True)
     close = getattr(driver.client, "close", None)
     if close:
-        print("[DEBUG-temporal-reconcile-close] before-client-close", file=sys.stderr, flush=True)
         maybe = close()
         if asyncio.iscoroutine(maybe):
             await maybe
-        print("[DEBUG-temporal-reconcile-close] after-client-close", file=sys.stderr, flush=True)
-    print("[DEBUG-temporal-reconcile-close] before-loop-exit", file=sys.stderr, flush=True)
 
 
 
