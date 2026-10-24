@@ -10,12 +10,17 @@ class FakeKubectl:
     def __init__(self):
         self.calls = []
         self.namespace_exists = False
+        self.namespaces = set()
         self.pods = set()
 
     def __call__(self, args, *, stdin=None):
         self.calls.append((tuple(args), stdin))
         if args[:2] == ["get", "namespace"]:
-            return KubectlResult(0 if self.namespace_exists else 1, "", "")
+            namespace = args[2]
+            exists = namespace in self.namespaces
+            if exists:
+                return KubectlResult(0, f"namespace/{namespace}", "")
+            return KubectlResult(1, "", f'Error from server (NotFound): namespaces "{namespace}" not found')
         if "get" in args and "pod" in args:
             pod = args[args.index("pod") + 1]
             if pod in self.pods:
@@ -26,19 +31,29 @@ class FakeKubectl:
                 f'Error from server (NotFound): pods "{pod}" not found',
             )
         if args[:2] == ["create", "namespace"]:
+            self.namespaces.add(args[2])
             self.namespace_exists = True
             return KubectlResult(0, "", "")
         if args[:2] == ["apply", "-f"]:
-            assert stdin and '"kind": "Pod"' in stdin
+            assert stdin
             import json
-            pod = json.loads(stdin)["metadata"]["name"]
-            self.pods.add(pod)
+            manifest = json.loads(stdin)
+            if manifest["kind"] == "Pod":
+                self.pods.add(manifest["metadata"]["name"])
             return KubectlResult(0, "", "")
         if "label" in args:
             return KubectlResult(0, "", "")
         if "delete" in args:
-            pod = args[args.index("pod") + 1]
-            self.pods.discard(pod)
+            if "pod" in args:
+                pod = args[args.index("pod") + 1]
+                self.pods.discard(pod)
+            elif "namespace" in args:
+                namespace = args[args.index("namespace") + 1]
+                self.namespaces.discard(namespace)
+                self.namespace_exists = bool(self.namespaces)
+                self.pods.clear()
+            elif "networkpolicy" in args:
+                return KubectlResult(0, "", "")
             return KubectlResult(0, "", "")
         return KubectlResult(1, "", "unexpected kubectl call")
 
@@ -87,9 +102,15 @@ def test_terminate_is_orphan_cleanup_safe():
     # --ignore-not-found=true.
     provider.terminate(sandbox)
 
+    # The first terminate removes the Pod, deny policy and namespace.
+    # The second observes that the per-sandbox namespace is already Gone and
+    # must be idempotent without issuing redundant deletes.
     delete_calls = [args for args, _ in kubectl.calls if "delete" in args]
-    assert len(delete_calls) == 2
+    assert [args[args.index("delete") + 1] for args in delete_calls] == [
+        "pod", "networkpolicy", "namespace"
+    ]
     assert all("--ignore-not-found=true" in args for args in delete_calls)
+    assert provider.is_gone(sandbox.sandbox_id) is True
 
 
 
@@ -131,7 +152,9 @@ def test_delete_timeout_is_ambiguous_and_retry_uses_same_sandbox_id():
     assert terminated.sandbox_id == original_id
     assert terminated.status.value == "terminated"
     delete_calls = [args for args, _ in kubectl.calls if "delete" in args]
-    assert len(delete_calls) == 2
+    assert [args[args.index("delete") + 1] for args in delete_calls] == [
+        "pod", "pod", "networkpolicy", "namespace"
+    ]
     assert all("--ignore-not-found=true" in args for args in delete_calls)
 
 

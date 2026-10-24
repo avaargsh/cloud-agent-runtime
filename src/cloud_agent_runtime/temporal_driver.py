@@ -56,6 +56,21 @@ def _workflow_is_terminal(status: Any) -> bool:
     return _workflow_status_name(status) in _TERMINAL_WORKFLOW_STATUSES
 
 
+def _workflow_execution_run_id(handle: Any, description: Any = None) -> str | None:
+    """Prefer the authoritative Describe run ID over optional handle metadata."""
+    described = (
+        description.get("run_id")
+        if isinstance(description, dict)
+        else getattr(description, "run_id", None)
+    )
+    if isinstance(described, str) and described.strip():
+        return described
+    first_execution = getattr(handle, "first_execution_run_id", None)
+    if isinstance(first_execution, str) and first_execution.strip():
+        return first_execution
+    return None
+
+
 @dataclass
 class TemporalWorkflowDriver:
     """Async adapter over a Temporal Python SDK Client."""
@@ -133,6 +148,7 @@ class TemporalWorkflowDriver:
                 'pip install -e ".[temporal]"'
             ) from exc
 
+        description = None
         try:
             handle = await self.client.start_workflow(
                 self.workflow_type,
@@ -187,11 +203,7 @@ class TemporalWorkflowDriver:
         return WorkflowRef(
             provider=self.name,
             workflow_id=workflow_id,
-            run_id=getattr(
-                handle,
-                "first_execution_run_id",
-                None,
-            ),
+            run_id=_workflow_execution_run_id(handle, description),
         )
 
     async def reconcile_start(
@@ -237,7 +249,7 @@ class TemporalWorkflowDriver:
         return WorkflowRef(
             provider=self.name,
             workflow_id=workflow_id,
-            run_id=getattr(handle, "first_execution_run_id", None),
+            run_id=_workflow_execution_run_id(handle, description),
         )
 
     async def signal(

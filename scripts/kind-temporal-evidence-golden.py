@@ -14,9 +14,26 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+from pathlib import Path
 from uuid import uuid4
 
 from temporalio.testing import WorkflowEnvironment
+
+
+async def _start_cached_time_skipping():
+    """Reuse the Temporal test-server executable and retry transient rate limits."""
+    download_dir = Path.home() / ".cache" / "temporal-test-server"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    for attempt in range(4):
+        try:
+            return await WorkflowEnvironment.start_time_skipping(
+                download_dest_dir=str(download_dir)
+            )
+        except RuntimeError as exc:
+            if "429 Too Many Requests" not in str(exc) or attempt == 3:
+                raise
+            await asyncio.sleep(2 ** attempt)
+    raise AssertionError("unreachable Temporal test-server retry state")
 from temporalio.worker import Worker
 
 from cloud_agent_runtime import (
@@ -62,7 +79,7 @@ async def scenario() -> None:
         object_store=EvidenceObjectStore(object_backend),
     )
 
-    async with await WorkflowEnvironment.start_time_skipping() as env:
+    async with await _start_cached_time_skipping() as env:
         task_queue = f"agentos-v32-{uuid4()}"
 
         async with Worker(
@@ -103,6 +120,7 @@ async def scenario() -> None:
             sandbox_a = runtime._sandboxes[canonical_run_id]
             sandbox_a_ref = run.sandbox_ref
             sandbox_a_id = sandbox_a.sandbox_id
+            sandbox_a_namespace = provider._namespace_for(sandbox_a_id)
 
             checkpoint = provider.snapshot(sandbox_a).snapshot_ref
             assert checkpoint is not None
@@ -117,6 +135,7 @@ async def scenario() -> None:
             )
             sandbox_b = runtime._sandboxes[canonical_run_id]
             sandbox_b_id = sandbox_b.sandbox_id
+            sandbox_b_namespace = provider._namespace_for(sandbox_b_id)
 
             assert rebound.run_id == canonical_run_id
             assert rebound.session_id == canonical_session_id
@@ -233,7 +252,9 @@ async def scenario() -> None:
             print(f"sandbox_a_ref={sandbox_a_ref}")
             print(f"sandbox_b_ref={rebound.sandbox_ref}")
             print(f"sandbox_a_id={sandbox_a_id}")
+            print(f"sandbox_a_namespace={sandbox_a_namespace}")
             print(f"sandbox_b_id={sandbox_b_id}")
+            print(f"sandbox_b_namespace={sandbox_b_namespace}")
             print(
                 "evidence_manifest="
                 f"{archived.manifest.manifest_key}"

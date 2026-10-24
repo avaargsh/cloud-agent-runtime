@@ -39,10 +39,21 @@ jobs:
         python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Pull-request acceptance must execute the advertised PR HEAD, not
+          # GitHub's synthetic refs/pull/<n>/merge commit.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install -U pip
+      - name: Cache Temporal ephemeral test server
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/temporal-test-server
+          key: temporal-test-server-${{ runner.os }}-v1
+          restore-keys: |
+            temporal-test-server-${{ runner.os }}-
       - run: pip install -e ".[dev]"
       - name: Run P0 recovery acceptance tests
         env:
@@ -53,7 +64,7 @@ jobs:
       - name: Record acceptance evidence
         if: always()
         env:
-          TESTED_SHA: ${{ github.sha }}
+          TESTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           PYTHON_VERSION: ${{ matrix.python-version }}
           JOB_STATUS: ${{ job.status }}
         run: |
@@ -78,6 +89,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: p0-recovery-report-py${{ matrix.python-version }}-${{ github.sha }}
+          name: p0-recovery-report-py${{ matrix.python-version }}-${{ github.event.pull_request.head.sha || github.sha }}
           path: recovery-report/
           if-no-files-found: warn

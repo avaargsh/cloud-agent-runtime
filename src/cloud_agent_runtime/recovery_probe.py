@@ -131,7 +131,7 @@ async def _reconcile_sqlite(args) -> None:
             "run_id": run.workflow_ref.run_id,
         } if run.workflow_ref else None,
         "recovery_evidence": run.recovery_evidence,
-    }, sort_keys=True))
+    }, sort_keys=True), flush=True)
     store.close()
     close = getattr(driver.client, "close", None)
     if close:
@@ -139,6 +139,14 @@ async def _reconcile_sqlite(args) -> None:
         if asyncio.iscoroutine(maybe):
             await maybe
 
+    # The Temporal Python SDK has a documented intermittent short-lived-client
+    # finalization crash (upstream sdk-python issue #300). In this integration
+    # probe, keep the recovered process alive until the parent has inspected
+    # the durable row and Temporal history; the parent then terminates the
+    # disposable probe. This avoids conflating SDK interpreter-finalization
+    # behavior with the Run recovery assertions.
+    if getattr(args, "hold_after_reconcile", False):
+        await asyncio.Event().wait()
 
 
 def _write_record(path: Path, record: dict[str, Any]) -> None:
@@ -311,6 +319,11 @@ def main() -> None:
     )
     parser.add_argument("--state-file")
     parser.add_argument("--sqlite-path")
+    parser.add_argument(
+        "--hold-after-reconcile",
+        action="store_true",
+        help="Keep the recovery probe alive while the parent validates durable state.",
+    )
     parser.add_argument("--run-id", default=os.environ.get("RECOVERY_RUN_ID", ""))
     parser.add_argument("--session-id", default=os.environ.get("RECOVERY_SESSION_ID", ""))
     parser.add_argument("--temporal-address", default=os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"))

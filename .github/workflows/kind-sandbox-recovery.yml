@@ -10,6 +10,11 @@ on:
       - "scripts/kind-sandbox-recovery-smoke.py"
       - "tests/test_kubernetes_sandbox.py"
       - "tests/test_kubernetes_sandbox_integration.py"
+      # Recovery-driver changes affect the recovery path exercised by this kind job.
+      - "src/cloud_agent_runtime/temporal_driver.py"
+      - "src/cloud_agent_runtime/recovery_probe.py"
+      - "tests/test_temporal_driver.py"
+      - "tests/test_temporal_ack_drop_proxy.py"
       - ".github/workflows/kind-sandbox-recovery.yml"
 
 jobs:
@@ -18,6 +23,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Use the exact PR branch SHA, not the synthetic merge ref.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -38,40 +46,46 @@ jobs:
           grep '^sandbox_a_ref=' /tmp/sandbox-recovery.txt
           grep '^sandbox_b_ref=' /tmp/sandbox-recovery.txt
           grep '^sandbox_a_id=' /tmp/sandbox-recovery.txt
+          grep '^sandbox_a_namespace=' /tmp/sandbox-recovery.txt
           grep '^sandbox_b_id=' /tmp/sandbox-recovery.txt
+          grep '^sandbox_b_namespace=' /tmp/sandbox-recovery.txt
       - name: Assert sandbox lifecycle convergence
         run: |
           sandbox_a_ref="$(sed -n 's/^sandbox_a_ref=//p' /tmp/sandbox-recovery.txt)"
           sandbox_b_ref="$(sed -n 's/^sandbox_b_ref=//p' /tmp/sandbox-recovery.txt)"
           sandbox_a_id="$(sed -n 's/^sandbox_a_id=//p' /tmp/sandbox-recovery.txt)"
+          sandbox_a_namespace="$(sed -n 's/^sandbox_a_namespace=//p' /tmp/sandbox-recovery.txt)"
           sandbox_b_id="$(sed -n 's/^sandbox_b_id=//p' /tmp/sandbox-recovery.txt)"
+          sandbox_b_namespace="$(sed -n 's/^sandbox_b_namespace=//p' /tmp/sandbox-recovery.txt)"
           test -n "$sandbox_a_ref"
           test -n "$sandbox_b_ref"
           test -n "$sandbox_a_id"
+          test -n "$sandbox_a_namespace"
           test -n "$sandbox_b_id"
+          test -n "$sandbox_b_namespace"
           test "$sandbox_a_ref" != "$sandbox_b_ref"
           test "$sandbox_a_id" != "$sandbox_b_id"
 
           dump_pods() {
-            kubectl -n agent-sandbox-smoke get pods               -o custom-columns='NAME:.metadata.name,UID:.metadata.uid,PHASE:.status.phase,DELETION:.metadata.deletionTimestamp'               | tee /tmp/sandbox-pods.txt
+            kubectl -n "$sandbox_b_namespace" get pods               -o custom-columns='NAME:.metadata.name,UID:.metadata.uid,PHASE:.status.phase,DELETION:.metadata.deletionTimestamp'               | tee /tmp/sandbox-pods.txt
           }
 
           dump_pods
-          if ! kubectl -n agent-sandbox-smoke wait --for=delete "pod/$sandbox_a_id" --timeout=60s; then
+          if ! kubectl -n "$sandbox_a_namespace" wait --for=delete "pod/$sandbox_a_id" --timeout=60s; then
             echo "old sandbox Pod did not converge to deletion: $sandbox_a_id ($sandbox_a_ref)" >&2
             dump_pods
             exit 1
           fi
 
-          kubectl -n agent-sandbox-smoke wait --for=condition=Ready "pod/$sandbox_b_id" --timeout=60s
+          kubectl -n "$sandbox_b_namespace" wait --for=condition=Ready "pod/$sandbox_b_id" --timeout=60s
           dump_pods
 
-          if kubectl -n agent-sandbox-smoke get "pod/$sandbox_a_id" >/dev/null 2>&1; then
+          if kubectl -n "$sandbox_a_namespace" get "pod/$sandbox_a_id" >/dev/null 2>&1; then
             echo "old sandbox Pod is still observable after delete wait: $sandbox_a_id" >&2
             exit 1
           fi
-          test "$(kubectl -n agent-sandbox-smoke get pods --no-headers | wc -l)" -eq 1
-          test "$(kubectl -n agent-sandbox-smoke get pod "$sandbox_b_id" -o jsonpath='{.metadata.name}')" = "$sandbox_b_id"
+          test "$(kubectl -n "$sandbox_b_namespace" get pods --no-headers | wc -l)" -eq 1
+          test "$(kubectl -n "$sandbox_b_namespace" get pod "$sandbox_b_id" -o jsonpath='{.metadata.name}')" = "$sandbox_b_id"
       - name: Upload recovery proof
         if: always()
         uses: actions/upload-artifact@v4

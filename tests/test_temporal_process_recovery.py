@@ -3,12 +3,30 @@ from __future__ import annotations
 import asyncio
 import json
 import signal
+import os
+from pathlib import Path
 import sqlite3
 import sys
 from uuid import uuid4
 
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.testing import WorkflowEnvironment
+
+
+async def _start_cached_time_skipping():
+    """Reuse the Temporal test-server executable and retry transient rate limits."""
+    download_dir = Path.home() / ".cache" / "temporal-test-server"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    for attempt in range(4):
+        try:
+            return await WorkflowEnvironment.start_time_skipping(
+                download_dest_dir=str(download_dir)
+            )
+        except RuntimeError as exc:
+            if "429 Too Many Requests" not in str(exc) or attempt == 3:
+                raise
+            await asyncio.sleep(2 ** attempt)
+    raise AssertionError("unreachable Temporal test-server retry state")
 from temporalio.worker import Worker
 
 from cloud_agent_runtime.temporal_workflow import AgentRunWorkflow
@@ -18,7 +36,7 @@ def test_real_subprocess_sigkill_after_temporal_acceptance_reconciles_sqlite(tmp
     async def scenario() -> None:
         db_path = tmp_path / "process-restart.sqlite"
         task_queue = f"p0-process-recovery-{uuid4()}"
-        async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with await _start_cached_time_skipping() as env:
             target = env.client.service_client.config.target_host
             async with Worker(
                 env.client,

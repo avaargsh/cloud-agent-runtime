@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import ssl
 import time
@@ -7,12 +8,15 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
-from urllib.request import (
-    HTTPRedirectHandler,
-    HTTPSHandler,
-    Request,
-    build_opener,
-)
+from temporalio.workflow import unsafe
+
+with unsafe.imports_passed_through():
+    from urllib.request import (
+        HTTPRedirectHandler,
+        HTTPSHandler,
+        Request,
+        build_opener,
+    )
 
 from .identity import (
     ApprovalGrant,
@@ -26,8 +30,6 @@ from .identity import (
     IdentityAuthorizationError,
     WorkloadIdentity,
 )
-
-
 class AuthorityUnavailableError(RuntimeError):
     """The authoritative identity service cannot be reached safely."""
 
@@ -235,6 +237,10 @@ def _decode_identity(data: Any) -> WorkloadIdentity:
         ):
             raise AuthorityProtocolError("authoritative identity scopes are invalid")
         values["allowed_scopes"] = tuple(raw_scopes)
+        sandbox_revision = data.get("sandbox_revision")
+        if type(sandbox_revision) is not int or sandbox_revision <= 0:
+            raise AuthorityProtocolError("authoritative sandbox revision is invalid")
+        values["sandbox_revision"] = sandbox_revision
         values["issued_at"] = _as_number(data, "issued_at")
         values["expires_at"] = _as_number(data, "expires_at")
         identity = WorkloadIdentity(**values)
@@ -255,6 +261,7 @@ def _identity_payload(identity: WorkloadIdentity) -> dict[str, Any]:
         "session_id": identity.session_id,
         "run_id": identity.run_id,
         "sandbox_id": identity.sandbox_id,
+        "sandbox_revision": identity.sandbox_revision,
         "workspace_ref": identity.workspace_ref,
         "binding_id": identity.binding_id,
         "capability": identity.capability,
@@ -335,7 +342,7 @@ class AuthoritativeCredentialBroker(CredentialBroker):
             raise IdentityAuthorizationError("credential binding or scopes do not match canonical identity")
 
         needs_approval = any(
-            scope.rsplit(":", 1)[-1].lower() in {"write", "delete", "admin", "mutate"}
+            scope.rsplit(":", 1)[-1].lower() not in ("read", "list", "metadata")
             for scope in requested
         )
         if request.approval_id is not None and not needs_approval:
@@ -409,6 +416,8 @@ class AuthoritativeCredentialBroker(CredentialBroker):
             _as_string(issued, "run_id") != identity.run_id
             or _as_string(issued, "session_id") != identity.session_id
             or _as_string(issued, "binding_id") != binding.binding_id
+            or _as_string(issued, "sandbox_id") != identity.sandbox_id
+            or _as_number(issued, "sandbox_revision") != identity.sandbox_revision
         ):
             raise AuthorityProtocolError("authoritative credential identity binding mismatch")
         return CredentialLease(
@@ -459,6 +468,8 @@ class AuthoritativeCredentialBroker(CredentialBroker):
         identity = _decode_identity(record.get("workload_identity"))
         if (
             identity.audience != actual_audience
+            or _as_string(record, "sandbox_id") != identity.sandbox_id
+            or _as_number(record, "sandbox_revision") != identity.sandbox_revision
             or identity.expires_at < expires_at
             or identity.expires_at <= self.clock()
             or set(scopes) - set(identity.allowed_scopes)
@@ -467,21 +478,39 @@ class AuthoritativeCredentialBroker(CredentialBroker):
         return identity
 
     def revoke_credential(self, credential_id: str) -> bool:
+        if not isinstance(credential_id, str) or not credential_id.strip():
+            raise ValueError("credential_id is required")
+        event_id = "runtime:credential:" + hashlib.sha256(
+            credential_id.encode("utf-8")
+        ).hexdigest()
         response = self.transport.request(
             "POST",
             "/v1/workload-credentials:revoke",
-            {"credential_id": credential_id},
+            {"credential_id": credential_id, "event_id": event_id},
         )
         revoked = response.get("revoked")
         if type(revoked) is not bool:
             raise AuthorityProtocolError("credential revocation acknowledgement is invalid")
         return revoked
 
-    def revoke_run(self, run_id: str) -> int:
+    def revoke_run(self, run_id: str, *, sandbox_revision: int) -> int:
+        if type(sandbox_revision) is not int or sandbox_revision <= 0:
+            raise ValueError("sandbox_revision must be a positive integer")
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ValueError("run_id is required")
+        event_id = (
+            "runtime:run:"
+            + hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+            + f":sandbox:{sandbox_revision}"
+        )
         response = self.transport.request(
             "POST",
             "/v1/workload-credentials:revoke-run",
-            {"run_id": run_id},
+            {
+                "run_id": run_id,
+                "sandbox_revision": sandbox_revision,
+                "event_id": event_id,
+            },
         )
         return _revoked_count(response)
 
@@ -491,11 +520,16 @@ class AuthoritativeCredentialBroker(CredentialBroker):
         *,
         event_id: str | None = None,
     ) -> int:
+        if not isinstance(approval_id, str) or not approval_id.strip():
+            raise ValueError("approval_id is required")
         body: dict[str, Any] = {"approval_id": approval_id}
-        if event_id is not None:
-            if not event_id.strip():
-                raise ValueError("event_id must be non-empty when supplied")
-            body["event_id"] = event_id
+        if event_id is not None and not event_id.strip():
+            raise ValueError("event_id must be non-empty when supplied")
+        body["event_id"] = event_id or (
+            "runtime:approval:"
+            + hashlib.sha256(approval_id.encode("utf-8")).hexdigest()
+            + ":revocation"
+        )
         response = self.transport.request(
             "POST",
             "/v1/workload-credentials:revoke-approval",
