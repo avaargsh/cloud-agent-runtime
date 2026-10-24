@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import json
+import re
 import sqlite3
 from pathlib import Path
 from threading import RLock
@@ -75,6 +77,28 @@ def _same_release_intent(left: dict[str, Any], right: dict[str, Any]) -> bool:
 
 
 def _validate_release_link(run: Run, candidate: dict[str, Any]) -> None:
+    if candidate.get("apiVersion") != "compute.release-request/v0.1":
+        raise ValueError("unsupported ComputeReleaseRequest apiVersion")
+    release_id = candidate.get("requestId")
+    source_id_field = candidate.get("sourceRequestId")
+    if not isinstance(release_id, str) or not re.fullmatch(r"[0-9a-f]{32}", release_id):
+        raise ValueError("release requestId must be exactly 32 lowercase hexadecimal characters")
+    if not isinstance(source_id_field, str) or not re.fullmatch(r"[0-9a-f]{32}", source_id_field):
+        raise ValueError("release sourceRequestId must be exactly 32 lowercase hexadecimal characters")
+    if release_id == source_id_field:
+        raise ValueError("release requestId must differ from the create requestId")
+    digest = candidate.get("intentDigest")
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ValueError("release intentDigest is malformed")
+    canonical = json.dumps(
+        {key: value for key, value in candidate.items() if key != "intentDigest"},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    expected_digest = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if digest != expected_digest:
+        raise ValueError("release intentDigest does not match the persisted release intent")
     source = run.compute_request
     if source is None or run.compute_binding is None:
         raise ValueError("cannot persist release intent without a committed ComputeRequest and route binding")
