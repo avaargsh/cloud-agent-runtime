@@ -6,12 +6,13 @@ on:
     paths:
       - "src/cloud_agent_runtime/kubernetes_sandbox.py"
       - "scripts/kind-sandbox-recovery-smoke.py"
+      - "tests/test_kubernetes_sandbox_integration.py"
       - ".github/workflows/kind-sandbox-recovery.yml"
 
 jobs:
   recovery:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,7 +22,11 @@ jobs:
         with:
           cluster_name: sandbox-recovery
       - name: Install runtime
-        run: pip install -e .
+        run: pip install -e ".[dev]"
+      - name: Run real namespace cleanup ACK-loss recovery across Runtime restart
+        run: pytest -vv -ra tests/test_kubernetes_sandbox_integration.py
+        env:
+          CLOUD_AGENT_RUNTIME_KUBERNETES_INTEGRATION: "1"
       - name: Run real Pod loss/rebind proof
         run: |
           python scripts/kind-sandbox-recovery-smoke.py | tee /tmp/sandbox-recovery.txt
