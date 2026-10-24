@@ -479,7 +479,8 @@ def test_temporal_worker_process_sigkill_restarts_same_workflow_identity(tmp_pat
         )
 
     async def scenario() -> None:
-        async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with await WorkflowEnvironment.start_local() as env:
+            assert not env.supports_time_skipping, "SIGKILL replay must run against the full local Temporal server"
             task_queue = f"test-agent-sigkill-{uuid4()}"
             workflow_id = f"agent-run-sigkill-{uuid4()}"
             runtime_run_id = f"canonical-run-{uuid4()}"
