@@ -4,6 +4,11 @@ from .async_workflow import (
     AsyncWorkflowDriver,
     InMemoryAsyncWorkflowDriver,
 )
+from .compute_execution import (
+    ComputeProfileConflict,
+    ComputeResourceClient,
+    ExecutionProfileRouter,
+)
 from .contracts import (
     Approval,
     ApprovalStatus,
@@ -65,6 +70,8 @@ __all__ = [
     "AsyncWorkflowDriver",
     "Budget",
     "CapabilityBinding",
+    "ComputeProfileConflict",
+    "ComputeResourceClient",
     "EvidenceArchive",
     "EvidenceEvent",
     "EvidenceIntegrityError",
@@ -73,6 +80,7 @@ __all__ = [
     "EvidenceObjectStore",
     "EvidenceRecord",
     "EvidenceRef",
+    "ExecutionProfileRouter",
     "InMemoryAsyncWorkflowDriver",
     "InMemoryObjectStore",
     "InMemorySandboxProvider",
