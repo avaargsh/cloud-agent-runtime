@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -43,7 +44,9 @@ class TemporalEventDispatcher:
             raise EventDeliveryUncertain("Temporal event observation is unavailable")
         for received in events:
             if isinstance(received, dict) and received.get("event_id") == event.event_id:
-                if received != event.to_dict():
+                if json.dumps(received, sort_keys=True) != json.dumps(
+                    event.to_dict(), sort_keys=True
+                ):
                     raise EventConflictError("Temporal event ID is bound to different content")
                 return True
         return False
