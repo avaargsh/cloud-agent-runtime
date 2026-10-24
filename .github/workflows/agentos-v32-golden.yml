@@ -39,6 +39,8 @@ jobs:
           grep '^workflow_id=' /tmp/agentos-v32-golden.txt
           grep '^sandbox_a_id=' /tmp/agentos-v32-golden.txt
           grep '^sandbox_b_id=' /tmp/agentos-v32-golden.txt
+          grep '^sandbox_a_namespace=' /tmp/agentos-v32-golden.txt
+          grep '^sandbox_b_namespace=' /tmp/agentos-v32-golden.txt
           grep '^evidence_manifest=' /tmp/agentos-v32-golden.txt
           grep '^policy_digest=sha256:' /tmp/agentos-v32-golden.txt
           grep '^trace_id=' /tmp/agentos-v32-golden.txt
@@ -46,21 +48,40 @@ jobs:
         run: |
           sandbox_a_id="$(sed -n 's/^sandbox_a_id=//p' /tmp/agentos-v32-golden.txt)"
           sandbox_b_id="$(sed -n 's/^sandbox_b_id=//p' /tmp/agentos-v32-golden.txt)"
+          sandbox_a_namespace="$(sed -n 's/^sandbox_a_namespace=//p' /tmp/agentos-v32-golden.txt)"
+          sandbox_b_namespace="$(sed -n 's/^sandbox_b_namespace=//p' /tmp/agentos-v32-golden.txt)"
           test -n "$sandbox_a_id"
           test -n "$sandbox_b_id"
+          test -n "$sandbox_a_namespace"
+          test -n "$sandbox_b_namespace"
           test "$sandbox_a_id" != "$sandbox_b_id"
+          test "$sandbox_a_namespace" != "$sandbox_b_namespace"
 
-          kubectl -n agentos-v32-golden wait             --for=delete "pod/$sandbox_a_id" --timeout=60s
-          kubectl -n agentos-v32-golden wait             --for=condition=Ready "pod/$sandbox_b_id" --timeout=60s
+          old_namespace_gone=0
+          for attempt in $(seq 1 60); do
+            if ! kubectl get namespace "$sandbox_a_namespace" >/dev/null 2>&1; then
+              old_namespace_gone=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$old_namespace_gone" -ne 1 ]; then
+            echo "old sandbox namespace did not converge to deletion: $sandbox_a_namespace" >&2
+            kubectl get namespaces
+            exit 1
+          fi
 
-          if kubectl -n agentos-v32-golden get             "pod/$sandbox_a_id" >/dev/null 2>&1; then
-            echo "old sandbox Pod still exists" >&2
+          kubectl -n "$sandbox_b_namespace" wait             --for=condition=Ready "pod/$sandbox_b_id" --timeout=60s
+
+          if kubectl get namespace "$sandbox_a_namespace" >/dev/null 2>&1; then
+            echo "old sandbox namespace still exists" >&2
             exit 1
           fi
 
           test "$(
-            kubectl -n agentos-v32-golden get pod               "$sandbox_b_id" -o jsonpath='{.metadata.name}'
+            kubectl -n "$sandbox_b_namespace" get pod               "$sandbox_b_id" -o jsonpath='{.metadata.name}'
           )" = "$sandbox_b_id"
+          test "$(kubectl -n "$sandbox_b_namespace" get pods --no-headers | wc -l)" -eq 1
       - name: Upload Golden Slice proof
         if: always()
         uses: actions/upload-artifact@v4

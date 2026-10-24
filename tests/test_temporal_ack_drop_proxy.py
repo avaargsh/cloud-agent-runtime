@@ -254,6 +254,7 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
         # advancement is needed. Use a full Temporal dev server instead
         # of the SDK's legacy Java time-skipping test server.
         async with await WorkflowEnvironment.start_local() as env:
+            assert not env.supports_time_skipping, "ACK-drop replay must run against the full local Temporal server"
             async with Worker(
                 env.client,
                 task_queue=task_queue,
@@ -264,6 +265,7 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
                 )
                 await proxy.start()
                 caller: asyncio.subprocess.Process | None = None
+                reconcile: asyncio.subprocess.Process | None = None
                 try:
                     caller = await asyncio.create_subprocess_exec(
                         sys.executable,
@@ -327,8 +329,6 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
 
                     reconcile = await asyncio.create_subprocess_exec(
                         sys.executable,
-                        "-X",
-                        "faulthandler",
                         "-m",
                         "cloud_agent_runtime.recovery_probe",
                         "reconcile-sqlite",
@@ -342,25 +342,59 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
                         "default",
                         "--task-queue",
                         task_queue,
+                        "--hold-open-for-test",
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
-                    recovered_stdout, recovered_stderr = await asyncio.wait_for(
-                        reconcile.communicate(), timeout=30
+                    assert reconcile.stdout is not None
+                    recovered_line = await asyncio.wait_for(
+                        reconcile.stdout.readline(), timeout=30
                     )
-                    assert reconcile.returncode == 0, (
-                        f"reconcile failed with {reconcile.returncode}; "
-                        f"stdout={recovered_stdout.decode(errors='replace')}; "
-                        f"stderr={recovered_stderr.decode(errors='replace')}"
+                    assert recovered_line, (
+                        "recovery process exited without a result line; "
+                        f"returncode={reconcile.returncode}"
                     )
-                    recovered = json.loads(recovered_stdout.decode())
-                    assert recovered["run_id"] == run_id
-                    assert recovered["recovery_operation_id"] == operation_id
-                    assert recovered["recovery_state"] == "attached"
-                    assert recovered["workflow_ref"]["workflow_id"] == workflow_id
+                    recovered = json.loads(recovered_line.decode())
+                    # Keep the restarted process alive as a real long-lived
+                    # runtime would. The Temporal Python SDK has an upstream
+                    # report about Python finalization failures in short-lived
+                    # client-only programs: https://github.com/temporalio/sdk-python/issues/300
+                    # This fault test verifies recovery while the runtime lives;
+                    # explicit shutdown is a separate lifecycle test.
+                    await asyncio.sleep(0.2)
+                    assert reconcile.returncode is None, (
+                        "recovery process exited after reporting attachment; "
+                        f"returncode={reconcile.returncode}"
+                    )
 
                     description = await handle.describe()
                     assert getattr(description.status, "name", "") == "RUNNING"
+                    temporal_execution_run_id = getattr(description, "run_id", None)
+                    assert isinstance(temporal_execution_run_id, str) and temporal_execution_run_id
+                    assert recovered["workflow_ref"]["run_id"] == temporal_execution_run_id
+
+                    # Independently reopen the durable store from the parent
+                    # process. A correct child-process object is not sufficient:
+                    # the canonical Run and concrete Temporal execution reference
+                    # must have been committed to SQLite for the next restart.
+                    with sqlite3.connect(db_path) as connection:
+                        recovered_rows = connection.execute(
+                            "SELECT run_id, payload FROM runs"
+                        ).fetchall()
+                    assert len(recovered_rows) == 1, (
+                        f"expected exactly one persisted canonical Run after recovery; "
+                        f"got {len(recovered_rows)}"
+                    )
+                    recovered_store_run_id, recovered_payload_text = recovered_rows[0]
+                    persisted_recovered = json.loads(recovered_payload_text)
+                    persisted_workflow_ref = persisted_recovered.get("workflow_ref") or {}
+                    assert recovered_store_run_id == run_id
+                    assert persisted_recovered["run_id"] == run_id
+                    assert persisted_recovered["session_id"] == persisted["session_id"]
+                    assert persisted_recovered["recovery_operation_id"] == operation_id
+                    assert persisted_recovered["recovery_state"] == "attached"
+                    assert persisted_workflow_ref.get("workflow_id") == workflow_id
+                    assert persisted_workflow_ref.get("run_id") == temporal_execution_run_id
                     history = await handle.fetch_history()
                     events = list(getattr(history, "events", []))
                     if not events and getattr(history, "history", None) is not None:
@@ -393,7 +427,7 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
                         "start_operation_id": operation_id,
                         "workflow_id": workflow_id,
                         "temporal_status_after_recovery": getattr(description.status, "name", str(description.status)),
-                        "temporal_execution_run_id": recovered["workflow_ref"].get("run_id"),
+                        "temporal_execution_run_id": temporal_execution_run_id,
                         "workflow_execution_started_event_count": len(started),
                         "duplicate_start": "rejected",
                         "caller_exit": "SIGKILL",
@@ -408,6 +442,9 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
                     )
                     print(f"TEMPORAL_ACK_DROP_EVIDENCE={evidence_path}")
                 finally:
+                    if reconcile is not None and reconcile.returncode is None:
+                        reconcile.kill()
+                        await asyncio.wait_for(reconcile.wait(), timeout=10)
                     if caller is not None and caller.returncode is None:
                         caller.kill()
                         await asyncio.wait_for(caller.wait(), timeout=10)

@@ -103,6 +103,7 @@ async def scenario() -> None:
             sandbox_a = runtime._sandboxes[canonical_run_id]
             sandbox_a_ref = run.sandbox_ref
             sandbox_a_id = sandbox_a.sandbox_id
+            sandbox_a_namespace = provider._namespace_for(sandbox_a_id)
 
             checkpoint = provider.snapshot(sandbox_a).snapshot_ref
             assert checkpoint is not None
@@ -117,6 +118,7 @@ async def scenario() -> None:
             )
             sandbox_b = runtime._sandboxes[canonical_run_id]
             sandbox_b_id = sandbox_b.sandbox_id
+            sandbox_b_namespace = provider._namespace_for(sandbox_b_id)
 
             assert rebound.run_id == canonical_run_id
             assert rebound.session_id == canonical_session_id
@@ -234,6 +236,8 @@ async def scenario() -> None:
             print(f"sandbox_b_ref={rebound.sandbox_ref}")
             print(f"sandbox_a_id={sandbox_a_id}")
             print(f"sandbox_b_id={sandbox_b_id}")
+            print(f"sandbox_a_namespace={sandbox_a_namespace}")
+            print(f"sandbox_b_namespace={sandbox_b_namespace}")
             print(
                 "evidence_manifest="
                 f"{archived.manifest.manifest_key}"

@@ -1,7 +1,7 @@
 """Real Kubernetes API recovery test, enabled in the disposable kind CI job.
 
-This is an API-server-backed test of the repository's Kubernetes adapter, not
-a claim that the adapter is a production-complete sandbox implementation.
+This exercises namespace-scoped sandbox destruction against a real API server;
+it does not claim production-cluster or production-provider acceptance.
 """
 from __future__ import annotations
 
@@ -23,12 +23,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _wait_until_pod_is_absent(namespace: str, pod_name: str, timeout_seconds: float = 30):
+def _wait_until_namespace_is_absent(namespace: str, timeout_seconds: float = 30):
     deadline = time.monotonic() + timeout_seconds
     last_stderr = ""
     while time.monotonic() < deadline:
         result = subprocess.run(
-            ["kubectl", "-n", namespace, "get", "pod", pod_name],
+            ["kubectl", "get", "namespace", namespace, "-o", "name"],
             text=True,
             capture_output=True,
             check=False,
@@ -36,55 +36,62 @@ def _wait_until_pod_is_absent(namespace: str, pod_name: str, timeout_seconds: fl
         )
         if result.returncode != 0:
             last_stderr = result.stderr
-            if "(NotFound)" in result.stderr or "not found" in result.stderr.lower():
+            if "not found" in result.stderr.lower() or "notfound" in result.stderr.lower():
                 return
             raise AssertionError(
-                f"kubectl get failed for a reason other than Pod absence: "
+                f"kubectl get namespace failed for a reason other than absence: "
                 f"{result.stderr.strip()}"
             )
         time.sleep(0.25)
     raise AssertionError(
-        f"Pod {namespace}/{pod_name} was not deleted in time: {last_stderr}"
+        f"Namespace {namespace} was not deleted in time: {last_stderr}"
     )
 
 
 def test_kubernetes_cleanup_timeout_recovers_after_runtime_restart(tmp_path):
-    namespace = f"agent-recovery-{uuid4().hex[:8]}"
+    namespace_prefix = f"agent-recovery-{uuid4().hex[:8]}"
     database = tmp_path / "kubernetes-cleanup-recovery.db"
     first_store = None
     second_store = None
+    provider = KubernetesSandboxProvider(
+        namespace=namespace_prefix,
+        image=os.environ.get(
+            "CLOUD_AGENT_RUNTIME_SANDBOX_IMAGE",
+            "busybox:1.36",
+        ),
+    )
+    real_kubectl = provider._kubectl
+
+    class TimeoutAfterNamespaceDeleteAccepted:
+        """Delete the real per-sandbox Namespace, then lose its acknowledgement."""
+
+        def __init__(self):
+            self.injected = False
+            self.delete_requests = 0
+
+        def __call__(self, args, *, stdin=None):
+            result = real_kubectl(args, stdin=stdin)
+            is_sandbox_namespace_delete = (
+                len(args) >= 3
+                and args[:2] == ["delete", "namespace"]
+                and args[2].startswith(namespace_prefix + "-sbx-")
+            )
+            if is_sandbox_namespace_delete:
+                self.delete_requests += 1
+                if not self.injected:
+                    self.injected = True
+                    # The real kubectl command has completed successfully and
+                    # the Namespace is gone; only the response to the caller
+                    # is lost, leaving the durable Run uncertain.
+                    raise subprocess.TimeoutExpired(
+                        cmd=["kubectl", *args],
+                        timeout=0.01,
+                    )
+            return result
+
+    ambiguous_kubectl = TimeoutAfterNamespaceDeleteAccepted()
+    provider._kubectl = ambiguous_kubectl
     try:
-        provider = KubernetesSandboxProvider(
-            namespace=namespace,
-            image=os.environ.get(
-                "CLOUD_AGENT_RUNTIME_SANDBOX_IMAGE",
-                "busybox:1.36",
-            ),
-            command_timeout_seconds=20,
-        )
-        real_kubectl = provider._kubectl
-
-        class TimeoutAfterDeleteAccepted:
-            """Apply a real delete, then lose its acknowledgement once."""
-
-            def __init__(self):
-                self.injected = False
-                self.delete_requests = 0
-
-            def __call__(self, args, *, stdin=None):
-                result = real_kubectl(args, stdin=stdin)
-                if "delete" in args and "pod" in args:
-                    self.delete_requests += 1
-                    if not self.injected:
-                        self.injected = True
-                        raise subprocess.TimeoutExpired(
-                            cmd=["kubectl", *args],
-                            timeout=0.01,
-                        )
-                return result
-
-        ambiguous_kubectl = TimeoutAfterDeleteAccepted()
-        provider._kubectl = ambiguous_kubectl
         first_store = SQLiteStore(database)
         first_runtime = AgentRuntime(
             store=first_store,
@@ -104,6 +111,7 @@ def test_kubernetes_cleanup_timeout_recovers_after_runtime_restart(tmp_path):
             "sandbox_ref": run.sandbox_ref,
             "sandbox_id": run.sandbox_binding.sandbox_id,
         }
+        original_namespace = provider._namespace_for(original["sandbox_id"])
 
         cancelled = first_runtime.cancel_run(
             run.run_id,
@@ -137,18 +145,16 @@ def test_kubernetes_cleanup_timeout_recovers_after_runtime_restart(tmp_path):
         ]
         assert [event["attempt"] for event in first_cleanup_events] == ["1", "1"]
 
-        # The API server accepted deletion even though the caller saw a timeout.
-        # The canonical Run must retain retry intent until a later request confirms
-        # cleanup; it must not allocate another sandbox to recover this Run.
-        _wait_until_pod_is_absent(namespace, original["sandbox_id"])
+        # The API server deleted the complete Namespace, including emptyDir
+        # workspace and policy, even though the caller lost the acknowledgement.
+        _wait_until_namespace_is_absent(original_namespace)
         first_store.close()
         first_store = None
 
         second_store = SQLiteStore(database)
         restarted_provider = KubernetesSandboxProvider(
-            namespace=namespace,
+            namespace=namespace_prefix,
             image=provider.image,
-            command_timeout_seconds=20,
         )
         restarted = AgentRuntime(
             store=second_store,
@@ -180,8 +186,8 @@ def test_kubernetes_cleanup_timeout_recovers_after_runtime_restart(tmp_path):
         assert durable_session.release_id == "recovery-test-release"
         assert durable_session.tenant_id == "recovery-test-tenant"
 
-        # Retry exactly the same idempotency intent after reconstructing the
-        # Runtime, SQLite connection, and Kubernetes provider adapter.
+        # Retry exactly the same cancellation/cleanup intent after reconstructing
+        # Runtime, SQLite, and Provider. It must not allocate a replacement.
         recovered = restarted.cancel_run(
             original["run_id"],
             reason="integration cleanup timeout",
@@ -221,7 +227,7 @@ def test_kubernetes_cleanup_timeout_recovers_after_runtime_restart(tmp_path):
             ("created", "running"),
             ("running", "cancelled"),
         ]
-        _wait_until_pod_is_absent(namespace, original["sandbox_id"])
+        _wait_until_namespace_is_absent(original_namespace)
     finally:
         if first_store is not None:
             first_store.close()
@@ -232,7 +238,7 @@ def test_kubernetes_cleanup_timeout_recovers_after_runtime_restart(tmp_path):
                 "kubectl",
                 "delete",
                 "namespace",
-                namespace,
+                namespace_prefix,
                 "--ignore-not-found=true",
                 "--wait=false",
             ],
