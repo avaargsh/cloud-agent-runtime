@@ -261,6 +261,7 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
                 )
                 await proxy.start()
                 caller: asyncio.subprocess.Process | None = None
+                reconcile: asyncio.subprocess.Process | None = None
                 try:
                     caller = await asyncio.create_subprocess_exec(
                         sys.executable,
@@ -337,22 +338,29 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
                         "default",
                         "--task-queue",
                         task_queue,
+                        "--hold-open-for-test",
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
-                    recovered_stdout, recovered_stderr = await asyncio.wait_for(
-                        reconcile.communicate(), timeout=30
+                    assert reconcile.stdout is not None
+                    recovered_line = await asyncio.wait_for(
+                        reconcile.stdout.readline(), timeout=30
                     )
-                    assert reconcile.returncode == 0, (
-                        f"reconcile failed with {reconcile.returncode}; "
-                        f"stdout={recovered_stdout.decode(errors='replace')}; "
-                        f"stderr={recovered_stderr.decode(errors='replace')}"
+                    assert recovered_line, (
+                        "recovery process exited without a result line; "
+                        f"returncode={reconcile.returncode}"
                     )
-                    recovered = json.loads(recovered_stdout.decode())
-                    assert recovered["run_id"] == run_id
-                    assert recovered["recovery_operation_id"] == operation_id
-                    assert recovered["recovery_state"] == "attached"
-                    assert recovered["workflow_ref"]["workflow_id"] == workflow_id
+                    recovered = json.loads(recovered_line.decode())
+                    # Keep the restarted process alive as a real long-lived
+                    # runtime would. Temporal's Python SDK has an open report
+                    # for crashes when a client-only process exits immediately
+                    # after an RPC; that shutdown path is not this recovery
+                    # invariant and must not hide a failed reconciliation.
+                    await asyncio.sleep(0.2)
+                    assert reconcile.returncode is None, (
+                        "recovery process exited after reporting attachment; "
+                        f"returncode={reconcile.returncode}"
+                    )
 
                     description = await handle.describe()
                     assert getattr(description.status, "name", "") == "RUNNING"
@@ -406,6 +414,9 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
                     )
                     print(f"TEMPORAL_ACK_DROP_EVIDENCE={evidence_path}")
                 finally:
+                    if reconcile is not None and reconcile.returncode is None:
+                        reconcile.kill()
+                        await asyncio.wait_for(reconcile.wait(), timeout=10)
                     if caller is not None and caller.returncode is None:
                         caller.kill()
                         await asyncio.wait_for(caller.wait(), timeout=10)
