@@ -33,11 +33,42 @@ class ComputeResourceClient(Protocol):
     ALLOCATED or RELEASED from an HTTP ACK alone.
     """
 
+    async def resolve_binding(
+        self,
+        *,
+        project_id: str,
+        compute_pool_id: str,
+    ) -> dict[str, Any]:
+        """Resolve the authoritative Pool -> Cluster route before first intent commit."""
+        ...
+
     async def submit_or_reconcile(
         self,
         request: dict[str, Any],
+        *,
+        binding: Mapping[str, Any],
     ) -> dict[str, Any]:
+        """Reconcile only through the route frozen in the persisted Run."""
         ...
+
+
+def _validate_binding(binding: Mapping[str, Any]) -> dict[str, Any]:
+    cluster_id = binding.get("clusterId")
+    provider = binding.get("provider")
+    generation = binding.get("providerBindingGeneration")
+    if not isinstance(cluster_id, str) or not cluster_id:
+        raise ValueError("trusted ComputePool binding is missing clusterId")
+    if not isinstance(provider, str) or not provider:
+        raise ValueError("trusted ComputePool binding is missing provider")
+    if type(generation) is not int or generation < 1:
+        raise ValueError("trusted ComputePool binding has an invalid providerBindingGeneration")
+    # Persist only the contract's stable route identity, not credentials or
+    # transient resolver data.
+    return {
+        "clusterId": cluster_id,
+        "provider": provider,
+        "providerBindingGeneration": generation,
+    }
 
 
 def _identifier(value: Any, name: str) -> str:
@@ -273,9 +304,22 @@ class ExecutionProfileRouter:
             stored_id = run.compute_request.get("requestId")
             if not isinstance(stored_id, str) or not _REQUEST_ID.fullmatch(stored_id):
                 raise ComputeProfileConflict("persisted ComputeRequest has an invalid requestId")
+            if run.compute_binding is None:
+                raise ComputeProfileConflict(
+                    "persisted ComputeRequest has no frozen Pool-to-Cluster route binding"
+                )
             request_id = stored_id
+            candidate_binding = _validate_binding(run.compute_binding)
         else:
-            # This random key is persisted atomically before submit_or_reconcile.
+            # Resolve the trusted route before side effects. Its first value is
+            # committed atomically with the request ID and must be reused after
+            # restart/timeout, even if the pool is later rebound elsewhere.
+            candidate_binding = _validate_binding(
+                await self.compute_client.resolve_binding(
+                    project_id=str(profile["projectId"]),
+                    compute_pool_id=compute_pool_id,
+                )
+            )
             request_id = secrets.token_hex(16)
 
         candidate = _build_request(
@@ -288,13 +332,21 @@ class ExecutionProfileRouter:
             command=command,
         )
         try:
-            request = self.store.persist_compute_request(run_id, candidate)
+            request, binding = self.store.persist_compute_request(
+                run_id,
+                candidate,
+                candidate_binding,
+            )
         except ValueError as exc:
             raise ComputeProfileConflict(str(exc)) from exc
 
-        # A restarted/replayed caller submits the same stored request ID. The
-        # adapter must reconcile the original receipt before any new side effect.
-        allocation = await self.compute_client.submit_or_reconcile(copy.deepcopy(request))
+        # Concurrent first dispatches can resolve different routes; the
+        # atomic winner's binding must be used by every loser/retry.
+        binding = _validate_binding(binding)
+        allocation = await self.compute_client.submit_or_reconcile(
+            copy.deepcopy(request),
+            binding=copy.deepcopy(binding),
+        )
         if not isinstance(allocation, Mapping):
             raise RuntimeError("Compute client returned a non-object allocation")
         return _validate_allocation(allocation, request)
