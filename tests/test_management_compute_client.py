@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import socket
 import threading
@@ -11,11 +12,42 @@ import pytest
 
 from cloud_agent_runtime.management_compute_client import (
     ManagementComputeClient,
+    ManagementProtocolError,
     ManagementRequestOutcomeUnknown,
 )
 
 
 IMAGE = "registry.example.test/worker@sha256:" + ("a" * 64)
+
+
+def server_mutation_fingerprint(body: dict[str, Any], workload_id: str) -> str:
+    """Independent test implementation of the Go Management fingerprint contract."""
+    spec = {key: body["spec"][key] for key in sorted(body["spec"])}
+    if isinstance(spec.get("accelerator"), dict):
+        spec["accelerator"] = {
+            key: spec["accelerator"][key]
+            for key in sorted(spec["accelerator"])
+        }
+    payload = {
+        "method": "PUT",
+        "cluster": "cluster-a",
+        "project": "project-a",
+        "kind": "Workload",
+        "resourceId": workload_id,
+        "expectedGeneration": body["expectedGeneration"],
+        "poolId": body["poolId"],
+        "spec": spec,
+    }
+    encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    for plain, escaped in (
+        ("&", r"\u0026"),
+        ("<", r"\u003c"),
+        (">", r"\u003e"),
+        ("\u2028", r"\u2028"),
+        ("\u2029", r"\u2029"),
+    ):
+        encoded = encoded.replace(plain, escaped)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 class MemoryAuthority:
@@ -40,8 +72,14 @@ class MemoryBindingResolver:
 
 
 class LocalManagementServer:
-    def __init__(self, *, drop_first_put_ack: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        drop_first_put_ack: bool = False,
+        receipt_digest_override: str | None = None,
+    ) -> None:
         self.drop_first_put_ack = drop_first_put_ack
+        self.receipt_digest_override = receipt_digest_override
         self.put_count = 0
         self.receipt: dict[str, Any] | None = None
         self.desired: dict[str, Any] | None = None
@@ -111,7 +149,7 @@ class LocalManagementServer:
                     "action": "create",
                     "expectedGeneration": 0,
                     "resultingGeneration": 1,
-                    "requestDigest": "d" * 64,
+                    "requestDigest": owner.receipt_digest_override or server_mutation_fingerprint(body, workload_id),
                     "committedAt": "2026-10-24T00:00:00Z",
                 }
                 owner.desired = {
@@ -307,6 +345,27 @@ def test_management_client_stops_after_unknown_commit_and_uses_same_key_on_retry
             assert server.put_count == 1
             assert resolver.calls == 1
             assert result["clusterId"] == "cluster-a"
+        finally:
+            server.close()
+
+    asyncio.run(scenario())
+
+
+
+def test_management_client_rejects_receipt_digest_for_another_mutation() -> None:
+    async def scenario() -> None:
+        server = LocalManagementServer(receipt_digest_override="f" * 64)
+        try:
+            client = ManagementComputeClient(
+                base_url=server.base_url,
+                token_provider=MemoryAuthority(),
+                binding_resolver=MemoryBindingResolver(),
+                allow_loopback_http=True,
+                timeout_seconds=2,
+            )
+            binding = await client.resolve_binding(project_id="project-a", compute_pool_id="pool-a")
+            with pytest.raises(ManagementProtocolError, match="requestDigest does not match"):
+                await client.submit_or_reconcile(request(), binding=binding)
         finally:
             server.close()
 
