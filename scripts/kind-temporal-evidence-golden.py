@@ -14,9 +14,26 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+from pathlib import Path
 from uuid import uuid4
 
 from temporalio.testing import WorkflowEnvironment
+
+
+async def _start_cached_time_skipping():
+    """Reuse the Temporal test-server executable and retry transient rate limits."""
+    download_dir = Path.home() / ".cache" / "temporal-test-server"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    for attempt in range(4):
+        try:
+            return await WorkflowEnvironment.start_time_skipping(
+                download_dest_dir=str(download_dir)
+            )
+        except RuntimeError as exc:
+            if "429 Too Many Requests" not in str(exc) or attempt == 3:
+                raise
+            await asyncio.sleep(2 ** attempt)
+    raise AssertionError("unreachable Temporal test-server retry state")
 from temporalio.worker import Worker
 
 from cloud_agent_runtime import (
@@ -62,7 +79,7 @@ async def scenario() -> None:
         object_store=EvidenceObjectStore(object_backend),
     )
 
-    async with await WorkflowEnvironment.start_time_skipping() as env:
+    async with await _start_cached_time_skipping() as env:
         task_queue = f"agentos-v32-{uuid4()}"
 
         async with Worker(
