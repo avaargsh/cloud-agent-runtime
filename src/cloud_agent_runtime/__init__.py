@@ -4,15 +4,6 @@ from .async_workflow import (
     AsyncWorkflowDriver,
     InMemoryAsyncWorkflowDriver,
 )
-from .management_compute_client import (
-    AccessTokenProvider,
-    ComputeAllocationObserver,
-    ComputePoolBindingResolver,
-    ManagementComputeClient,
-    ManagementProtocolError,
-    ManagementRequestOutcomeUnknown,
-    ManagementRequestRejected,
-)
 from .compute_execution import (
     ComputeProfileConflict,
     ComputeResourceClient,
@@ -67,6 +58,31 @@ from .tool_contract import (
     execute_tool,
 )
 from .workflow import InMemoryWorkflowDriver, WorkflowRef
+
+_MANAGEMENT_COMPUTE_EXPORTS = frozenset({
+    "AccessTokenProvider",
+    "ComputeAllocationObserver",
+    "ComputePoolBindingResolver",
+    "ManagementComputeClient",
+    "ManagementProtocolError",
+    "ManagementRequestOutcomeUnknown",
+    "ManagementRequestRejected",
+})
+
+
+def __getattr__(name: str):
+    """Load HTTP/Management infrastructure exports only on explicit use.
+
+    Temporal imports the package initializer while constructing its workflow
+    sandbox. Eagerly importing urllib-based Management client code here brings
+    nondeterministic network infrastructure into the workflow import graph.
+    """
+    if name in _MANAGEMENT_COMPUTE_EXPORTS:
+        from . import management_compute_client
+
+        return getattr(management_compute_client, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "AgentRuntime",
