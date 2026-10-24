@@ -54,6 +54,17 @@ def _workflow_status_name(status: Any) -> str:
 
 def _execution_run_id(description: Any) -> str | None:
     """Return the concrete execution run ID from a verified describe response."""
+    # Temporal's WorkflowExecutionDescription inherits WorkflowExecution, so
+    # run_id is a direct property (not description.execution.run_id).
+    run_id = (
+        description.get("run_id")
+        if isinstance(description, dict)
+        else getattr(description, "run_id", None)
+    )
+    if isinstance(run_id, str) and run_id.strip():
+        return run_id
+
+    # Support lightweight adapter/test responses that wrap execution fields.
     execution = (
         description.get("execution")
         if isinstance(description, dict)
