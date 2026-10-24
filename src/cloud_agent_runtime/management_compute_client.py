@@ -73,6 +73,34 @@ def _management_request_digest(
     return hashlib.sha256(_go_json_dumps(fingerprint).encode("utf-8")).hexdigest()
 
 
+def _management_release_digest(
+    release_request: Mapping[str, Any],
+    *,
+    cluster_id: str,
+) -> str:
+    """Match Management mutationFingerprint for DELETE (no pool/spec input)."""
+    fingerprint = {
+        "method": "DELETE",
+        "cluster": cluster_id,
+        "project": release_request["projectId"],
+        "kind": "Workload",
+        "resourceId": release_request["workloadId"],
+        "expectedGeneration": release_request["expectedGeneration"],
+        "poolId": "",
+    }
+    return hashlib.sha256(_go_json_dumps(fingerprint).encode("utf-8")).hexdigest()
+
+
+def _release_intent_digest(release_request: Mapping[str, Any]) -> str:
+    canonical = json.dumps(
+        {key: value for key, value in release_request.items() if key != "intentDigest"},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class ManagementRequestOutcomeUnknown(RuntimeError):
     """A public Management mutation may have committed, but no receipt is available."""
 
@@ -239,6 +267,7 @@ class ManagementComputeClient:
         token: str,
         request_id: str,
         body: bytes | None = None,
+        if_match: str | None = None,
     ) -> tuple[int, bytes]:
         headers = {
             "Authorization": f"Bearer {token}",
@@ -248,6 +277,8 @@ class ManagementComputeClient:
         }
         if body is not None:
             headers["Content-Type"] = "application/json"
+        if if_match is not None:
+            headers["If-Match"] = if_match
         req = Request(url, data=body, headers=headers, method=method)
         try:
             with self._opener.open(req, timeout=self.timeout_seconds) as response:
@@ -273,6 +304,7 @@ class ManagementComputeClient:
         token: str,
         request_id: str,
         body: bytes | None = None,
+        if_match: str | None = None,
     ) -> tuple[int, bytes]:
         return await asyncio.to_thread(
             self._request_sync,
@@ -281,6 +313,7 @@ class ManagementComputeClient:
             token=token,
             request_id=request_id,
             body=body,
+            if_match=if_match,
         )
 
     async def _json_read(
