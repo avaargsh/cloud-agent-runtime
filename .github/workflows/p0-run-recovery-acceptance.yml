@@ -43,6 +43,13 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install -U pip
+      - name: Cache Temporal ephemeral test server
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/temporal-test-server
+          key: temporal-test-server-${{ runner.os }}-v1
+          restore-keys: |
+            temporal-test-server-${{ runner.os }}-
       - run: pip install -e ".[dev]"
       - name: Run P0 recovery acceptance tests
         env:
