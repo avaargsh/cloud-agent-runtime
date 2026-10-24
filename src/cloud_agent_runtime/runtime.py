@@ -394,7 +394,7 @@ class AgentRuntime:
                 provider=intent.provider,
                 sandbox_id=intent.sandbox_id,
                 state="cleanup_pending",
-                updated_at=wall_clock(),
+                updated_at=wall_time(),
             ))
         except Exception:
             # The original "allocating" record remains durable if possible.
@@ -427,7 +427,7 @@ class AgentRuntime:
 
         if self.sandbox_provider is None:
             return 0
-        current_time = wall_clock() if now is None else now
+        current_time = wall_time() if now is None else now
         reconciled = 0
         for intent in list_intents():
             if intent.provider != self.sandbox_provider.name:
@@ -572,7 +572,7 @@ class AgentRuntime:
                     provider=self.sandbox_provider.name,
                     sandbox_id=sandbox_id,
                     state="allocating",
-                    updated_at=wall_clock(),
+                    updated_at=wall_time(),
                 )
                 save_intent(allocation_intent)
                 try:
