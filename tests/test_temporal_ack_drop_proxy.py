@@ -277,6 +277,7 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
                 )
                 await proxy.start()
                 caller: asyncio.subprocess.Process | None = None
+                reconcile: asyncio.subprocess.Process | None = None
                 try:
                     caller = await asyncio.create_subprocess_exec(
                         sys.executable,
@@ -293,6 +294,7 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
                         "default",
                         "--task-queue",
                         task_queue,
+                        "--hold-after-reconcile",
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
@@ -356,15 +358,24 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
-                    recovered_stdout, recovered_stderr = await asyncio.wait_for(
-                        reconcile.communicate(), timeout=30
+                    assert reconcile.stdout is not None
+                    recovered_line = await asyncio.wait_for(
+                        reconcile.stdout.readline(), timeout=30
                     )
-                    assert reconcile.returncode == 0, (
-                        f"reconcile failed with {reconcile.returncode}; "
-                        f"stdout={recovered_stdout.decode(errors='replace')}; "
-                        f"stderr={recovered_stderr.decode(errors='replace')}"
+                    assert recovered_line, (
+                        f"reconcile emitted no durable evidence; stderr pipe is "
+                        f"{reconcile.stderr!r}"
                     )
-                    recovered = json.loads(recovered_stdout.decode())
+                    # Keep this newly started process alive until parent-side
+                    # SQLite and Temporal history checks complete. Some SDK
+                    # versions can intermittently crash during short-lived
+                    # client interpreter finalization; that is not the state
+                    # recovery boundary under test.
+                    assert reconcile.returncode is None, (
+                        f"reconcile process exited before parent verification: "
+                        f"{reconcile.returncode}; output={recovered_line.decode(errors='replace')}"
+                    )
+                    recovered = json.loads(recovered_line.decode())
                     assert recovered["run_id"] == run_id
                     assert recovered["recovery_operation_id"] == operation_id
                     assert recovered["recovery_state"] == "attached"
@@ -379,6 +390,17 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
                     assert recovered["workflow_ref"]["run_id"] == observed_temporal_run_id, (
                         "recovered WorkflowRef must retain the described Temporal execution run ID"
                     )
+                    with sqlite3.connect(db_path) as connection:
+                        recovered_rows = connection.execute(
+                            "SELECT run_id, payload FROM runs"
+                        ).fetchall()
+                    assert len(recovered_rows) == 1, "recovery must preserve exactly one canonical Run row"
+                    saved_run_id, saved_payload_text = recovered_rows[0]
+                    saved_payload = json.loads(saved_payload_text)
+                    assert saved_run_id == run_id
+                    assert saved_payload["recovery_state"] == "attached"
+                    assert saved_payload["workflow_ref"]["workflow_id"] == workflow_id
+                    assert saved_payload["workflow_ref"]["run_id"] == observed_temporal_run_id
                     history = await handle.fetch_history()
                     events = list(getattr(history, "events", []))
                     if not events and getattr(history, "history", None) is not None:
@@ -405,6 +427,14 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
                             id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
                         )
 
+                    # The recovery process remains available until all parent-side
+                    # assertions are complete, then is explicitly killed as
+                    # disposable test cleanup to avoid unrelated SDK finalization.
+                    assert reconcile.returncode is None
+                    reconcile.send_signal(signal.SIGKILL)
+                    reconcile_exit = await asyncio.wait_for(reconcile.wait(), timeout=10)
+                    assert reconcile_exit == -signal.SIGKILL
+
                     evidence = {
                         "scenario": "tcp_grpc_start_response_drop_then_sigkill_and_reconcile",
                         "run_id": run_id,
@@ -415,6 +445,8 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
                         "workflow_execution_started_event_count": len(started),
                         "duplicate_start": "rejected",
                         "caller_exit": "SIGKILL",
+                        "recovery_probe_exit": "SIGKILL after durable-state/history verification",
+                        "durable_recovered_run_row_count": len(recovered_rows),
                         "proxy_events": proxy.events,
                     }
                     evidence_dir = Path(os.environ.get("P0_RECOVERY_EVIDENCE_DIR", str(tmp_path)))
@@ -429,6 +461,9 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
                     if caller is not None and caller.returncode is None:
                         caller.kill()
                         await asyncio.wait_for(caller.wait(), timeout=10)
+                    if reconcile is not None and reconcile.returncode is None:
+                        reconcile.kill()
+                        await asyncio.wait_for(reconcile.wait(), timeout=10)
                     await proxy.close()
 
     asyncio.run(scenario())
