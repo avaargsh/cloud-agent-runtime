@@ -1,10 +1,8 @@
 import pytest
 
-from cloud_agent_runtime import (
-    CapabilityBinding,
-    InMemorySandboxProvider,
-    InMemoryWorkflowDriver,
-)
+from cloud_agent_runtime import InMemorySandboxProvider, InMemoryWorkflowDriver
+from cloud_agent_runtime.contracts import CapabilityBinding
+from cloud_agent_runtime.identity import CredentialBinding
 from cloud_agent_runtime.authoritative_identity import (
     ApprovalRevocationEvent,
     ApprovalRevocationFanout,
