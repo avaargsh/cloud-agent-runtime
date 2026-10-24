@@ -259,3 +259,28 @@ def test_temporal_driver_reconcile_start_rejects_terminal_workflow() -> None:
         assert client.started == []
 
     asyncio.run(scenario())
+
+
+def test_temporal_driver_reconcile_uses_described_run_id_when_handle_has_none() -> None:
+    async def scenario():
+        client = FakeClient()
+        client.handle.first_execution_run_id = None
+
+        async def describe_with_run_id():
+            return {"status": "RUNNING", "run_id": "temporal-run-from-describe"}
+
+        client.handle.describe = describe_with_run_id
+        driver = TemporalWorkflowDriver(client=client, task_queue="agent-runs")
+        from cloud_agent_runtime.temporal_driver import deterministic_start_operation_id
+
+        ref = await driver.reconcile_start(
+            runtime_run_id="run-described-id",
+            session_id="session-described-id",
+            operation_id=deterministic_start_operation_id("run-described-id"),
+        )
+
+        assert ref.workflow_id == "agent-run-run-described-id"
+        assert ref.run_id == "temporal-run-from-describe"
+        assert client.started == []
+
+    asyncio.run(scenario())
