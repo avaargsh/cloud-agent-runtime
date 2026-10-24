@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import sqlite3
 
+from .workflow import WorkflowRef
+
 
 EVENT_SCHEMA_VERSION = 1
 _TERMINAL_RUN_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
@@ -86,6 +88,15 @@ class SQLiteEventInbox:
             "CREATE INDEX IF NOT EXISTS external_events_run_sequence "
             "ON external_events(run_id, sequence)"
         )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS external_event_receipts (
+                event_id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                workflow_run_id TEXT
+            )
+            """
+        )
         self._connection.commit()
 
     def _verify_owner(self, run_id: str, tenant_id: str) -> dict:
@@ -142,6 +153,81 @@ class SQLiteEventInbox:
             (run_id, tenant_id, limit),
         ).fetchall()
         return [EventEnvelope.from_dict(json.loads(row[0])) for row in rows]
+
+    def bound_workflow(self, *, run_id: str, tenant_id: str) -> tuple[WorkflowRef, str]:
+        """Read canonical workflow reference; never derive it from untrusted input."""
+        run = self._verify_owner(run_id, tenant_id)
+        binding = run.get("workflow_ref")
+        if (
+            not isinstance(binding, dict)
+            or binding.get("provider") != "temporal"
+            or not isinstance(binding.get("workflow_id"), str)
+            or not binding["workflow_id"].strip()
+            or (
+                binding.get("run_id") is not None
+                and (
+                    not isinstance(binding["run_id"], str)
+                    or not binding["run_id"].strip()
+                )
+            )
+        ):
+            raise PermissionError("canonical Temporal workflow binding is unavailable")
+        return WorkflowRef(**binding), run["session_id"]
+
+    def list_pending(
+        self, *, run_id: str, tenant_id: str, limit: int = 100
+    ) -> list[EventEnvelope]:
+        if type(limit) is not int or not (1 <= limit <= 1000):
+            raise ValueError("limit must be an integer between 1 and 1000")
+        self._verify_owner(run_id, tenant_id)
+        rows = self._connection.execute(
+            "SELECT e.payload FROM external_events e "
+            "LEFT JOIN external_event_receipts r ON r.event_id = e.event_id "
+            "WHERE e.run_id = ? AND e.tenant_id = ? AND r.event_id IS NULL "
+            "ORDER BY e.sequence LIMIT ?",
+            (run_id, tenant_id, limit),
+        ).fetchall()
+        return [EventEnvelope.from_dict(json.loads(row[0])) for row in rows]
+
+    def mark_delivered(self, event: EventEnvelope, workflow: WorkflowRef) -> None:
+        """Persist a receipt only after the owning workflow has confirmed it.
+
+        The caller must verify the server-observed event first; an RPC Signal ACK
+        alone is insufficient. This method checks immutable local ownership.
+        """
+        payload = json.dumps(event.to_dict(), sort_keys=True, separators=(",", ":"))
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            run = self._verify_owner(event.run_id, event.tenant_id)
+            binding = run.get("workflow_ref")
+            if (
+                not isinstance(binding, dict)
+                or binding.get("provider") != workflow.provider
+                or binding.get("workflow_id") != workflow.workflow_id
+                or binding.get("run_id") != workflow.run_id
+            ):
+                raise PermissionError("canonical Temporal workflow binding changed")
+            row = self._connection.execute(
+                "SELECT payload FROM external_events WHERE event_id = ? "
+                "AND run_id = ? AND tenant_id = ?",
+                (event.event_id, event.run_id, event.tenant_id),
+            ).fetchone()
+            if row is None or row[0] != payload:
+                raise EventConflictError("delivery receipt is not bound to stored event")
+            existing = self._connection.execute(
+                "SELECT workflow_id, workflow_run_id FROM external_event_receipts "
+                "WHERE event_id = ?", (event.event_id,)
+            ).fetchone()
+            receipt = (workflow.workflow_id, workflow.run_id)
+            if existing is not None:
+                if tuple(existing) != receipt:
+                    raise EventConflictError("delivery receipt has conflicting workflow")
+                return
+            self._connection.execute(
+                "INSERT INTO external_event_receipts "
+                "(event_id, workflow_id, workflow_run_id) VALUES (?, ?, ?)",
+                (event.event_id, *receipt),
+            )
 
     def close(self) -> None:
         self._connection.close()
