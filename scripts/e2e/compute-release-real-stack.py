@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -15,6 +16,7 @@ import urllib.parse
 import urllib.request
 import http.client
 import ssl
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,7 +28,7 @@ from cloud_agent_runtime.management_compute_client import ManagementComputeClien
 
 
 POLL_SECONDS = 2
-_IMAGE_DIGEST = __import__("re").compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
+_IMAGE_DIGEST = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 
 
 def required_env(name: str) -> str:
@@ -233,12 +235,19 @@ class LiveProviderAbsenceObserver:
         selector = f"ai.compute/workload=job-{workload_id}"
         jobs = kubectl_json(self.namespace, "jobs", selector, self.context)
         pods = kubectl_json(self.namespace, "pods", selector, self.context)
+        kueue_workloads = kubectl_json(self.namespace, "workloads.kueue.x-k8s.io", selector, self.context)
         exact_job = kubectl_object(self.namespace, "job", f"job-{workload_id}", self.context)
-        if control_status != 404 or jobs["items"] or pods["items"] or exact_job is not None:
+        if (
+            control_status != 404
+            or jobs["items"]
+            or pods["items"]
+            or kueue_workloads["items"]
+            or exact_job is not None
+        ):
             return common
 
-        # RELEASED requires an independent Control Plane 404 plus exact Job,
-        # label-selected Job/Pod, and resource-claim absence observations.
+        # This test uses Kueue's Job-backed accelerator path (not DRA). RELEASED
+        # requires independent Control Plane, Job, Pod, and Kueue Workload absence.
         common.update({
             "state": "RELEASED",
             "observedGeneration": generation,
@@ -253,6 +262,7 @@ class LiveProviderAbsenceObserver:
                 f"control-plane://{binding['clusterId']}/workloads/{workload_id}/404",
                 f"kubernetes://{binding['clusterId']}/namespaces/{self.namespace}/jobs/job-{workload_id}/absent",
                 f"kubernetes://{binding['clusterId']}/namespaces/{self.namespace}/pods?selector={urllib.parse.quote(selector)}/absent",
+                f"kueue://{binding['clusterId']}/namespaces/{self.namespace}/workloads?selector={urllib.parse.quote(selector)}/absent",
             ],
         })
         return common
