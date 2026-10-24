@@ -64,7 +64,14 @@ class RecordingComputeClient:
             "computePoolId": request["computePoolId"],
             "workloadId": request["workload"]["id"],
             "generation": 1,
+            "clusterId": "cluster-a",
+            "provider": "kueue",
+            "providerBindingGeneration": 1,
+            "observedGeneration": 0,
             "state": "REQUESTED",
+            "providerRefs": [],
+            "conditions": [],
+            "evidenceRefs": [],
         }
 
 
@@ -294,7 +301,14 @@ class CommitThenLoseAckClient:
                 "computePoolId": request["computePoolId"],
                 "workloadId": request["workload"]["id"],
                 "generation": 1,
+                "clusterId": "cluster-a",
+                "provider": "kueue",
+                "providerBindingGeneration": 1,
+                "observedGeneration": 0,
                 "state": "REQUESTED",
+                "providerRefs": [],
+                "conditions": [],
+                "evidenceRefs": [],
             }
         if self.lose_first_ack:
             self.lose_first_ack = False
@@ -401,5 +415,147 @@ def test_stale_run_save_cannot_erase_compute_request_intent() -> None:
             store.save_run(run)  # stale snapshot lacks the committed compute intent
 
         assert store.get_run(run.run_id).compute_request == before
+
+    asyncio.run(scenario())
+
+
+
+def test_allocation_rejects_stale_observation_generation() -> None:
+    class StaleClient:
+        async def submit_or_reconcile(self, request: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "requestId": request["requestId"],
+                "projectId": request["projectId"],
+                "computePoolId": request["computePoolId"],
+                "workloadId": request["workload"]["id"],
+                "generation": 3,
+                "clusterId": "cluster-a",
+                "provider": "kueue",
+                "providerBindingGeneration": 2,
+                "observedGeneration": 2,
+                "state": "ALLOCATED",
+                "providerRefs": [{
+                    "kind": "Job",
+                    "namespace": "worker",
+                    "name": "job-run-a",
+                    "uid": "api-uid",
+                    "resourceVersion": "42",
+                    "generation": 1,
+                    "imageDigest": request["workload"]["image"].rsplit("@", 1)[1],
+                    "ownershipProofRef": "evidence-ownership-run-a",
+                }],
+                "conditions": [{"type": "OwnershipProven", "status": "TRUE", "observedAt": "2026-10-24T00:00:00Z"}],
+                "evidenceRefs": ["evidence-allocation-run-a"],
+            }
+
+    async def scenario() -> None:
+        store = InMemoryStore()
+        _runtime, _session, run = runtime_with_run(store)
+        router = ExecutionProfileRouter(store=store, compute_client=StaleClient())
+        with pytest.raises(RuntimeError, match="stale observedGeneration"):
+            await router.dispatch(
+                run.run_id,
+                profile=profile(
+                    "gpu-workload",
+                    {"mode": "required", "class": "h100-80g", "quota": 1},
+                ),
+                compute_pool_id="pool-a",
+                image=IMAGE,
+                command=["python", "-m", "train"],
+            )
+
+    asyncio.run(scenario())
+
+
+def test_allocation_requires_image_bound_provider_ownership_proof() -> None:
+    class ForeignImageClient:
+        async def submit_or_reconcile(self, request: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "requestId": request["requestId"],
+                "projectId": request["projectId"],
+                "computePoolId": request["computePoolId"],
+                "workloadId": request["workload"]["id"],
+                "generation": 1,
+                "clusterId": "cluster-a",
+                "provider": "kueue",
+                "providerBindingGeneration": 1,
+                "observedGeneration": 1,
+                "state": "ALLOCATED",
+                "providerRefs": [{
+                    "kind": "Job",
+                    "namespace": "worker",
+                    "name": "job-run-a",
+                    "uid": "api-uid",
+                    "resourceVersion": "42",
+                    "generation": 1,
+                    "imageDigest": "sha256:" + ("f" * 64),
+                    "ownershipProofRef": "evidence-ownership-run-a",
+                }],
+                "conditions": [{"type": "OwnershipProven", "status": "TRUE", "observedAt": "2026-10-24T00:00:00Z"}],
+                "evidenceRefs": ["evidence-allocation-run-a"],
+            }
+
+    async def scenario() -> None:
+        store = InMemoryStore()
+        _runtime, _session, run = runtime_with_run(store)
+        router = ExecutionProfileRouter(store=store, compute_client=ForeignImageClient())
+        with pytest.raises(RuntimeError, match="image digest does not match"):
+            await router.dispatch(
+                run.run_id,
+                profile=profile(
+                    "gpu-workload",
+                    {"mode": "required", "class": "h100-80g", "quota": 1},
+                ),
+                compute_pool_id="pool-a",
+                image=IMAGE,
+                command=["python", "-m", "train"],
+            )
+
+    asyncio.run(scenario())
+
+
+def test_release_cannot_be_claimed_with_provider_refs_remaining() -> None:
+    class IncompleteCleanupClient:
+        async def submit_or_reconcile(self, request: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "requestId": request["requestId"],
+                "projectId": request["projectId"],
+                "computePoolId": request["computePoolId"],
+                "workloadId": request["workload"]["id"],
+                "generation": 1,
+                "clusterId": "cluster-a",
+                "provider": "kueue",
+                "providerBindingGeneration": 1,
+                "observedGeneration": 1,
+                "state": "RELEASED",
+                "providerRefs": [{
+                    "kind": "Job",
+                    "namespace": "worker",
+                    "name": "job-run-a",
+                    "uid": "api-uid",
+                    "resourceVersion": "42",
+                    "generation": 1,
+                    "imageDigest": request["workload"]["image"].rsplit("@", 1)[1],
+                    "ownershipProofRef": "evidence-ownership-run-a",
+                }],
+                "conditions": [{"type": "CleanupComplete", "status": "TRUE", "observedAt": "2026-10-24T00:00:00Z"}],
+                "evidenceRefs": ["evidence-cleanup-run-a"],
+            }
+
+    async def scenario() -> None:
+        store = InMemoryStore()
+        _runtime, _session, run = runtime_with_run(store)
+        router = ExecutionProfileRouter(store=store, compute_client=IncompleteCleanupClient())
+        with pytest.raises(RuntimeError, match="cleanup/absence evidence is incomplete"):
+            await router.dispatch(
+                run.run_id,
+                profile=profile(
+                    "gpu-workload",
+                    {"mode": "required", "class": "h100-80g", "quota": 1},
+                ),
+                compute_pool_id="pool-a",
+                image=IMAGE,
+                command=["python", "-m", "train"],
+            )
 
     asyncio.run(scenario())
