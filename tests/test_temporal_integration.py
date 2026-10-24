@@ -479,7 +479,10 @@ def test_temporal_worker_process_sigkill_restarts_same_workflow_identity(tmp_pat
         )
 
     async def scenario() -> None:
-        async with await WorkflowEnvironment.start_time_skipping() as env:
+        # This must use a real Temporal dev server: the legacy V1 time-skipping
+        # server is useful for deterministic timer tests, but is not the right
+        # substrate for a Worker running in a different OS process.
+        async with await WorkflowEnvironment.start_local() as env:
             task_queue = f"test-agent-sigkill-{uuid4()}"
             workflow_id = f"agent-run-sigkill-{uuid4()}"
             runtime_run_id = f"canonical-run-{uuid4()}"
