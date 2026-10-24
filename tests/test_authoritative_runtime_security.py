@@ -2,7 +2,6 @@ import pytest
 
 from cloud_agent_runtime import (
     CapabilityBinding,
-    CredentialBinding,
     InMemorySandboxProvider,
     InMemoryWorkflowDriver,
 )
@@ -21,6 +20,7 @@ from cloud_agent_runtime.authoritative_runtime_security import (
 )
 from cloud_agent_runtime.identity import (
     ApprovalGrant,
+    CredentialBinding,
     AuthenticatedPrincipal,
     CredentialRequest,
     IdentityAuthorizationError,
