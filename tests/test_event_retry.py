@@ -230,3 +230,17 @@ def test_invalid_retry_configuration_is_rejected(persisted_event):
         EventRetryCoordinator(inbox, dispatcher, base_delay_seconds=0)
     with pytest.raises(ValueError):
         EventRetryCoordinator(inbox, dispatcher, attempt_timeout_seconds=0)
+
+
+def test_competing_dispatcher_claim_does_not_consume_retry_budget(persisted_event):
+    _, _, inbox, event = persisted_event
+    driver = FakeDriver()
+    assert inbox.try_claim(event, owner_token="another-dispatcher")
+    retry = runner(inbox, driver, [100.0])
+    outcome = tick(retry)
+    assert outcome.status == "inflight"
+    assert outcome.attempts == 0
+    assert inbox.get_retry_state(event) is None
+    assert driver.signals == []
+    assert inbox.release_claim(event, owner_token="another-dispatcher")
+    assert tick(retry).status == "confirmed"

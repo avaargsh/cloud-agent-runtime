@@ -108,6 +108,15 @@ class SQLiteEventInbox:
         )
         self._connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS external_event_delivery_claims (
+                event_id TEXT PRIMARY KEY,
+                owner_token TEXT NOT NULL,
+                expires_at INTEGER NOT NULL
+            )
+            """
+        )
+        self._connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS external_event_retries (
                 event_id TEXT PRIMARY KEY,
                 attempts INTEGER NOT NULL CHECK (attempts >= 1),
@@ -281,13 +290,72 @@ class SQLiteEventInbox:
                 (event.event_id,),
             )
 
-    def mark_delivered(self, event: EventEnvelope, workflow: WorkflowRef) -> None:
+    def try_claim(
+        self, event: EventEnvelope, *, owner_token: str, lease_seconds: int = 60
+    ) -> bool:
+        """Atomically claim an unacknowledged event across SQLite connections.
+
+        An expired worker may overlap a successor; Workflow event-id deduplication
+        supplies logical idempotency, not exactly-once Signal transport.
+        """
+        if not isinstance(owner_token, str) or not owner_token.strip():
+            raise ValueError("owner_token must be non-empty")
+        if type(lease_seconds) is not int or not (1 <= lease_seconds <= 3600):
+            raise ValueError("lease_seconds must be an integer between 1 and 3600")
+        payload = json.dumps(event.to_dict(), sort_keys=True, separators=(",", ":"))
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            self._verify_owner(event.run_id, event.tenant_id)
+            row = self._connection.execute(
+                "SELECT payload FROM external_events WHERE event_id = ? "
+                "AND run_id = ? AND tenant_id = ?",
+                (event.event_id, event.run_id, event.tenant_id),
+            ).fetchone()
+            if row is None or row[0] != payload:
+                raise EventConflictError("delivery claim is not bound to stored event")
+            if self._connection.execute(
+                "SELECT 1 FROM external_event_receipts WHERE event_id = ?",
+                (event.event_id,),
+            ).fetchone():
+                return False
+            cursor = self._connection.execute(
+                "INSERT INTO external_event_delivery_claims "
+                "(event_id, owner_token, expires_at) "
+                "VALUES (?, ?, CAST(strftime('%s', 'now') AS INTEGER) + ?) "
+                "ON CONFLICT(event_id) DO UPDATE SET "
+                "owner_token = excluded.owner_token, "
+                "expires_at = excluded.expires_at "
+                "WHERE external_event_delivery_claims.expires_at <= "
+                "CAST(strftime('%s', 'now') AS INTEGER)",
+                (event.event_id, owner_token, lease_seconds),
+            )
+            return cursor.rowcount == 1
+
+    def release_claim(self, event: EventEnvelope, *, owner_token: str) -> bool:
+        """Release only the caller's claim, never a replacement worker's claim."""
+        if not isinstance(owner_token, str) or not owner_token.strip():
+            raise ValueError("owner_token must be non-empty")
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            self._verify_owner(event.run_id, event.tenant_id)
+            cursor = self._connection.execute(
+                "DELETE FROM external_event_delivery_claims "
+                "WHERE event_id = ? AND owner_token = ?",
+                (event.event_id, owner_token),
+            )
+            return cursor.rowcount == 1
+
+    def mark_delivered(
+        self, event: EventEnvelope, workflow: WorkflowRef, *, owner_token: str
+    ) -> None:
         """Persist a receipt only after the owning workflow has confirmed it.
 
         The caller must verify the server-observed event first; an RPC Signal ACK
         alone is insufficient. This method checks immutable local ownership.
         """
         payload = json.dumps(event.to_dict(), sort_keys=True, separators=(",", ":"))
+        if not isinstance(owner_token, str) or not owner_token.strip():
+            raise ValueError("owner_token must be non-empty")
         with self._connection:
             self._connection.execute("BEGIN IMMEDIATE")
             run = self._verify_owner(event.run_id, event.tenant_id)
@@ -299,6 +367,16 @@ class SQLiteEventInbox:
                 or binding.get("run_id") != workflow.run_id
             ):
                 raise PermissionError("canonical Temporal workflow binding changed")
+            claim = self._connection.execute(
+                "SELECT owner_token, expires_at FROM external_event_delivery_claims "
+                "WHERE event_id = ?",
+                (event.event_id,),
+            ).fetchone()
+            now = self._connection.execute(
+                "SELECT CAST(strftime('%s', 'now') AS INTEGER)"
+            ).fetchone()[0]
+            if claim is None or claim[0] != owner_token or claim[1] <= now:
+                raise PermissionError("delivery claim is missing, expired or owned elsewhere")
             row = self._connection.execute(
                 "SELECT payload FROM external_events WHERE event_id = ? "
                 "AND run_id = ? AND tenant_id = ?",
@@ -323,6 +401,11 @@ class SQLiteEventInbox:
                 "INSERT INTO external_event_receipts "
                 "(event_id, workflow_id, workflow_run_id) VALUES (?, ?, ?)",
                 (event.event_id, *receipt),
+            )
+            self._connection.execute(
+                "DELETE FROM external_event_delivery_claims WHERE event_id = ? "
+                "AND owner_token = ?",
+                (event.event_id, owner_token),
             )
             self._connection.execute(
                 "DELETE FROM external_event_retries WHERE event_id = ?",

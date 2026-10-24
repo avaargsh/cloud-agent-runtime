@@ -42,6 +42,8 @@ class EventRetryCoordinator:
     def __post_init__(self) -> None:
         if self.dispatcher.inbox is not self.inbox:
             raise ValueError("coordinator and dispatcher must share the same Inbox")
+        if self.attempt_timeout_seconds >= self.dispatcher.delivery_lease_seconds:
+            raise ValueError("attempt timeout must be shorter than dispatch lease")
         if (
             isinstance(self.max_attempts, bool)
             or not isinstance(self.max_attempts, int)
@@ -95,6 +97,13 @@ class EventRetryCoordinator:
                 ),
                 timeout=self.attempt_timeout_seconds,
             )
+            if confirmed == 0:
+                # A different Dispatcher holds an active SQLite delivery claim.
+                # Do not spend this event's retry budget on legitimate contention.
+                return RetryOutcome(
+                    "inflight", event.event_id,
+                    previous.attempts if previous else 0,
+                )
             if confirmed != 1:
                 raise EventDeliveryUncertain(
                     "pending event was not confirmed", reason="confirmation_timeout"

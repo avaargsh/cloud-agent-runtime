@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 from dataclasses import replace
 
 import pytest
@@ -195,4 +196,105 @@ def test_unpinned_temporal_execution_is_rejected_before_signal(tmp_path, run_id)
     assert driver.signals == []
     assert inbox.list_pending(run_id="run-a", tenant_id="tenant-a") == [event]
     inbox.close()
+    store.close()
+
+
+def test_two_sqlite_connections_have_single_live_delivery_claim(tmp_path):
+    store, left, event, path = seeded_inbox(tmp_path)
+    right = SQLiteEventInbox(path)
+    assert left.try_claim(event, owner_token="worker-a", lease_seconds=60)
+    assert not right.try_claim(event, owner_token="worker-b", lease_seconds=60)
+    assert not right.release_claim(event, owner_token="worker-b")
+    assert right.list_pending(run_id="run-a", tenant_id="tenant-a") == [event]
+    with pytest.raises(PermissionError, match="delivery claim"):
+        right.mark_delivered(
+            event, store.get_run("run-a").workflow_ref, owner_token="worker-b"
+        )
+    assert left.release_claim(event, owner_token="worker-a")
+    assert right.try_claim(event, owner_token="worker-b", lease_seconds=60)
+    assert right.release_claim(event, owner_token="worker-b")
+    right.close()
+    left.close()
+    store.close()
+
+
+def test_expired_owner_cannot_commit_receipt_or_release_successor(tmp_path):
+    store, left, event, path = seeded_inbox(tmp_path)
+    right = SQLiteEventInbox(path)
+    assert left.try_claim(event, owner_token="dead-worker", lease_seconds=60)
+    # Deterministic crash-timeout simulation, without sleeping or wall-clock races.
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "UPDATE external_event_delivery_claims SET expires_at = 0 "
+            "WHERE event_id = ?", (event.event_id,)
+        )
+    assert right.try_claim(event, owner_token="replacement", lease_seconds=60)
+    assert not left.release_claim(event, owner_token="dead-worker")
+    with pytest.raises(PermissionError, match="delivery claim"):
+        left.mark_delivered(
+            event, store.get_run("run-a").workflow_ref, owner_token="dead-worker"
+        )
+    assert left.list_pending(run_id="run-a", tenant_id="tenant-a") == [event]
+    right.mark_delivered(
+        event, store.get_run("run-a").workflow_ref, owner_token="replacement"
+    )
+    assert left.list_pending(run_id="run-a", tenant_id="tenant-a") == []
+    right.close()
+    left.close()
+    store.close()
+
+
+def test_expired_crashed_worker_reconciles_remote_event_without_resignal(tmp_path):
+    store, left, event, path = seeded_inbox(tmp_path)
+    right = SQLiteEventInbox(path)
+    assert left.try_claim(event, owner_token="dead-worker", lease_seconds=60)
+    driver = FakeTemporalDriver()
+    driver.state["external_events"].append(event.to_dict())
+    dispatcher = TemporalEventDispatcher(right, driver)
+    assert asyncio.run(dispatcher.deliver_pending(run_id="run-a", tenant_id="tenant-a")) == 0
+    assert driver.signals == []
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "UPDATE external_event_delivery_claims SET expires_at = 0 "
+            "WHERE event_id = ?", (event.event_id,)
+        )
+    assert asyncio.run(dispatcher.deliver_pending(run_id="run-a", tenant_id="tenant-a")) == 1
+    assert driver.signals == []
+    assert left.list_pending(run_id="run-a", tenant_id="tenant-a") == []
+    right.close()
+    left.close()
+    store.close()
+
+
+def test_two_dispatchers_do_not_send_concurrent_signals_for_same_event(tmp_path):
+    store, left, event, path = seeded_inbox(tmp_path)
+    right = SQLiteEventInbox(path)
+
+    class PausedTemporalDriver(FakeTemporalDriver):
+        def __init__(self):
+            super().__init__()
+            self.before_signal = asyncio.Event()
+            self.allow_signal = asyncio.Event()
+
+        async def signal(self, workflow, *, name, payload):
+            self.before_signal.set()
+            await self.allow_signal.wait()
+            await super().signal(workflow, name=name, payload=payload)
+
+    async def scenario():
+        driver = PausedTemporalDriver()
+        a = TemporalEventDispatcher(left, driver)
+        b = TemporalEventDispatcher(right, driver)
+        first = asyncio.create_task(a.deliver_pending(run_id="run-a", tenant_id="tenant-a"))
+        await asyncio.wait_for(driver.before_signal.wait(), timeout=5)
+        assert await b.deliver_pending(run_id="run-a", tenant_id="tenant-a") == 0
+        assert driver.signals == []
+        driver.allow_signal.set()
+        assert await first == 1
+        assert driver.signals == [event.to_dict()]
+
+    asyncio.run(scenario())
+    assert left.list_pending(run_id="run-a", tenant_id="tenant-a") == []
+    right.close()
+    left.close()
     store.close()
