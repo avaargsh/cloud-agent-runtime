@@ -152,7 +152,7 @@ class AgentRunWorkflow:
         self,
         payload: dict[str, Any],
     ) -> None:
-        if self._state is None:
+        if self._state is None or self._state.terminal:
             return
 
         approval_id = str(
@@ -192,7 +192,8 @@ class AgentRunWorkflow:
                 or "approval denied"
             )
             self._state.terminal = True
-        else:
+        elif not self._state.paused:
+            # Resolving an approval must not override a manual pause.
             self._transition(
                 to_phase="running",
                 event_type="approval_resolved",
