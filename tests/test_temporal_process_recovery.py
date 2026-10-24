@@ -63,6 +63,8 @@ def test_real_subprocess_sigkill_after_temporal_acceptance_reconciles_sqlite(tmp
 
                 reconcile = await asyncio.create_subprocess_exec(
                     sys.executable,
+                    "-X",
+                    "faulthandler",
                     "-m",
                     "cloud_agent_runtime.recovery_probe",
                     "reconcile-sqlite",
