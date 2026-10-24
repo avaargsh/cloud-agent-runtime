@@ -383,11 +383,28 @@ class ExecutionProfileRouter:
             # This is a read-only authority check. It prevents a stale or
             # caller-forged Allocation generation from permanently pinning the
             # Run to an invalid immutable release intent.
-            await verifier(
-                request=copy.deepcopy(request),
-                binding=copy.deepcopy(binding),
-                expected_generation=expected_generation,
-            )
+            preflight_error: Exception | None = None
+            try:
+                await verifier(
+                    request=copy.deepcopy(request),
+                    binding=copy.deepcopy(binding),
+                    expected_generation=expected_generation,
+                )
+            except Exception as exc:
+                preflight_error = exc
+
+            # Another caller can persist the release key while this caller is
+            # doing the read-only check. If that happened, recover its exact key
+            # rather than replacing it; still reject a changed Generation.
+            refreshed = self.store.get_run(run_id)
+            existing_release = refreshed.compute_release_request
+            if existing_release is None and preflight_error is not None:
+                raise preflight_error
+            if existing_release is not None:
+                if existing_release.get("expectedGeneration") != expected_generation:
+                    raise ComputeProfileConflict(
+                        "persisted release intent Generation differs from the observed allocation"
+                    )
         release_id = (
             existing_release.get("requestId")
             if isinstance(existing_release, Mapping)
