@@ -47,13 +47,29 @@ class KubernetesSandboxProvider:
 
     @staticmethod
     def _run_kubectl(args: list[str], *, stdin: str | None = None) -> KubectlResult:
+        # The subprocess deadline must not undercut kubectl's own bounded wait.
+        # Leave a small grace period for request setup and the final response.
+        process_timeout_seconds = 15.0
+        for argument in args:
+            if argument.startswith("--timeout="):
+                timeout_value = argument.partition("=")[2]
+                if timeout_value.endswith("s"):
+                    try:
+                        requested_wait = float(timeout_value[:-1])
+                    except ValueError:
+                        continue
+                    if requested_wait > 0:
+                        process_timeout_seconds = max(
+                            process_timeout_seconds,
+                            requested_wait + 5.0,
+                        )
         result = subprocess.run(
             ["kubectl", *args],
             text=True,
             input=stdin,
             capture_output=True,
             check=False,
-            timeout=15,
+            timeout=process_timeout_seconds,
         )
         return KubectlResult(result.returncode, result.stdout, result.stderr)
 
