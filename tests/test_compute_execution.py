@@ -823,3 +823,44 @@ def test_release_intent_rejects_generation_drift_after_first_commit() -> None:
         assert store.get_run(run.run_id).compute_release_request["expectedGeneration"] == 1
 
     asyncio.run(scenario())
+
+
+
+def test_stale_allocation_generation_does_not_poison_release_intent() -> None:
+    class RejectGenerationClient(RecordingComputeClient):
+        async def verify_release_target(
+            self,
+            *,
+            request: dict[str, Any],
+            binding: dict[str, Any],
+            expected_generation: int,
+        ) -> None:
+            if expected_generation != 1:
+                raise ComputeProfileConflict("authoritative Desired Generation mismatch")
+
+    async def scenario() -> None:
+        store = InMemoryStore()
+        _runtime, _session, run = runtime_with_run(store)
+        client = RejectGenerationClient(store)
+        router = ExecutionProfileRouter(store=store, compute_client=client)
+        created = await router.dispatch(
+            run.run_id,
+            profile=profile(
+                "gpu-workload",
+                {"mode": "required", "class": "h100-80g", "quota": 1},
+            ),
+            compute_pool_id="pool-a",
+            image=IMAGE,
+            command=["python", "-m", "train"],
+        )
+        assert created is not None
+        stale_or_forged = copy.deepcopy(created)
+        stale_or_forged["generation"] = 2
+
+        with pytest.raises(ComputeProfileConflict, match="Generation mismatch"):
+            await router.release(run.run_id, allocation=stale_or_forged)
+
+        assert store.get_run(run.run_id).compute_release_request is None
+        assert client.release_requests == []
+
+    asyncio.run(scenario())
