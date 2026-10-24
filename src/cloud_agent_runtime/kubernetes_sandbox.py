@@ -230,7 +230,8 @@ class KubernetesSandboxProvider:
         namespace = self._namespace_for(sandbox.sandbox_id)
         probe = self._kubectl(["get", "namespace", namespace, "-o", "name"])
         if probe.returncode != 0:
-            if "not found" in probe.stderr.lower():
+            detail = f"{probe.stdout}\n{probe.stderr}".lower()
+            if "not found" in detail or "notfound" in detail:
                 # Idempotent cleanup after an earlier namespace deletion.
                 sandbox.status = SandboxStatus.TERMINATED
                 return sandbox
@@ -238,20 +239,11 @@ class KubernetesSandboxProvider:
                 f"kubectl get namespace {namespace} failed: {probe.stderr.strip()}"
             )
 
-        # Explicit deletes make provider cleanup observable and retryable;
-        # namespace deletion then removes unexpected leftover resources.
-        # API ACK is not proof that async namespace finalization ended.
-        self._check([
-            "-n", namespace, "delete", "pod", sandbox.sandbox_id,
-            "--ignore-not-found=true", "--wait=false",
-        ])
-        self._check([
-            "-n", namespace, "delete", "networkpolicy", "default-deny-all",
-            "--ignore-not-found=true", "--wait=false",
-        ])
-        # Do not acknowledge termination until Kubernetes confirms the
-        # namespace (and its ephemeral workspace) has disappeared. A timeout
-        # raises so the runtime can retain cleanup intent and retry.
+        # Namespace deletion is the cleanup barrier. Do not delete the Pod or
+        # deny-all policy first: if a later Namespace delete fails or times
+        # out, the policy must remain in force for any resources still present.
+        # --wait=true waits for the Namespace to disappear; a timeout/lost ACK
+        # remains ambiguous and leaves the durable cleanup reference retryable.
         self._check([
             "delete", "namespace", namespace,
             "--ignore-not-found=true", "--wait=true", "--timeout=60s",
@@ -259,20 +251,18 @@ class KubernetesSandboxProvider:
         sandbox.status = SandboxStatus.TERMINATED
         return sandbox
 
-
     def is_gone(self, sandbox_id: str) -> bool:
-        """Confirm namespace and Pod absence independently; ambiguous errors fail closed."""
+        """Confirm the dedicated Namespace is absent; Pod absence alone is insufficient."""
         namespace = self._namespace_for(sandbox_id)
         ns = self._kubectl(["get", "namespace", namespace, "-o", "name"])
-        if ns.returncode != 0:
-            detail = f"{ns.stdout}\n{ns.stderr}".lower()
-            if "not found" in detail or "notfound" in detail:
-                return True
-            raise RuntimeError(f"cannot confirm namespace state: {ns.stderr.strip()}")
-        pod = self._kubectl(["-n", namespace, "get", "pod", sandbox_id, "-o", "name"])
-        if pod.returncode == 0:
+        if ns.returncode == 0:
+            # A namespace can outlive its Pod and still contain other namespaced
+            # objects or storage. It is not cleaned up until Kubernetes reports
+            # the Namespace itself absent.
             return False
-        detail = f"{pod.stdout}\n{pod.stderr}".lower()
+        detail = f"{ns.stdout}\n{ns.stderr}".lower()
         if "not found" in detail or "notfound" in detail:
             return True
-        raise RuntimeError(f"cannot confirm Pod state: {pod.stderr.strip()}")
+        raise RuntimeError(
+            f"cannot confirm Namespace {namespace} is Gone: {ns.stderr.strip()}"
+        )
