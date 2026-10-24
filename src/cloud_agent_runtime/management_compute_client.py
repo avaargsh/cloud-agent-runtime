@@ -408,6 +408,75 @@ class ManagementComputeClient:
             )
         return generation
 
+    def _validate_release_request(
+        self,
+        release_request: Mapping[str, Any],
+        *,
+        request: Mapping[str, Any],
+    ) -> None:
+        request_id = release_request.get("requestId")
+        source_request_id = release_request.get("sourceRequestId")
+        if not isinstance(request_id, str) or not _REQUEST_ID.fullmatch(request_id):
+            raise ManagementProtocolError("release requestId must be exactly 32 lowercase hexadecimal characters")
+        if not isinstance(source_request_id, str) or source_request_id != request.get("requestId"):
+            raise ManagementProtocolError("release sourceRequestId does not match the immutable create request")
+        if request_id == source_request_id:
+            raise ManagementProtocolError("release requestId must differ from the create requestId")
+        if release_request.get("apiVersion") != "compute.release-request/v0.1":
+            raise ManagementProtocolError("unsupported ComputeReleaseRequest apiVersion")
+        source_workload = request.get("workload")
+        if not isinstance(source_workload, Mapping):
+            raise ManagementProtocolError("source ComputeRequest workload is malformed")
+        expected = {
+            "projectId": request.get("projectId"),
+            "computePoolId": request.get("computePoolId"),
+            "workloadId": source_workload.get("id"),
+            "correlation": request.get("correlation"),
+        }
+        for field, expected_value in expected.items():
+            if release_request.get(field) != expected_value:
+                raise ManagementProtocolError(f"release intent {field} does not match source ComputeRequest")
+        generation = release_request.get("expectedGeneration")
+        if type(generation) is not int or generation < 1:
+            raise ManagementProtocolError("release expectedGeneration must be a positive server-issued Generation")
+        digest = release_request.get("intentDigest")
+        if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+            raise ManagementProtocolError("release intentDigest is malformed")
+        if digest != _release_intent_digest(release_request):
+            raise ManagementProtocolError("release intentDigest does not match persisted release intent")
+
+    def _validate_release_receipt(
+        self,
+        receipt: Mapping[str, Any],
+        *,
+        release_request: Mapping[str, Any],
+        cluster_id: str,
+    ) -> int:
+        expected_generation = release_request["expectedGeneration"]
+        required = {
+            "requestId": release_request["requestId"],
+            "status": "desired-committed",
+            "clusterId": cluster_id,
+            "projectId": release_request["projectId"],
+            "kind": "Workload",
+            "resourceId": release_request["workloadId"],
+            "action": "delete-request",
+            "expectedGeneration": expected_generation,
+            "resultingGeneration": expected_generation,
+        }
+        for field, expected in required.items():
+            if receipt.get(field) != expected:
+                raise ManagementProtocolError(f"Management release receipt mismatch for {field}")
+        digest = receipt.get("requestDigest")
+        if not isinstance(digest, str) or not _SHA256_HEX.fullmatch(digest):
+            raise ManagementProtocolError("Management release receipt has an invalid requestDigest")
+        expected_digest = _management_release_digest(release_request, cluster_id=cluster_id)
+        if digest != expected_digest:
+            raise ManagementProtocolError(
+                "Management release receipt requestDigest does not match this DELETE"
+            )
+        return expected_generation
+
     def _validate_desired(
         self,
         desired: Mapping[str, Any],
@@ -479,6 +548,234 @@ class ManagementComputeClient:
             "provider": provider,
             "providerBindingGeneration": binding_generation,
         }
+
+    async def release_or_reconcile(
+        self,
+        release_request: dict[str, Any],
+        *,
+        request: Mapping[str, Any],
+        binding: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Issue/reconcile DELETE under a distinct release key; never infer RELEASED from ACK."""
+        self._validate_request(request)
+        request = copy_json(request)
+        release_request = copy_json(release_request)
+        self._validate_release_request(release_request, request=request)
+
+        request_id = release_request["requestId"]
+        project_id = release_request["projectId"]
+        pool_id = release_request["computePoolId"]
+        workload_id = release_request["workloadId"]
+        expected_generation = release_request["expectedGeneration"]
+
+        if not isinstance(binding, Mapping):
+            raise ManagementProtocolError("Persisted ComputePool route binding is missing")
+        if binding.get("projectId") != project_id or binding.get("computePoolId") != pool_id:
+            raise ManagementProtocolError("Persisted release route does not match ComputeReleaseRequest Project/Pool")
+        cluster_id = binding.get("clusterId")
+        provider = binding.get("provider")
+        binding_generation = binding.get("providerBindingGeneration")
+        if not isinstance(cluster_id, str) or not cluster_id:
+            raise ManagementProtocolError("Persisted release route binding is missing clusterId")
+        if not isinstance(provider, str) or not provider:
+            raise ManagementProtocolError("Persisted release route binding is missing provider")
+        if type(binding_generation) is not int or binding_generation < 1:
+            raise ManagementProtocolError("Persisted release route has invalid providerBindingGeneration")
+        self._safe_path_segment(cluster_id, "clusterId")
+
+        token = await self.token_provider.access_token_for_project(project_id)
+        if not isinstance(token, str) or not token or any(c in token for c in (chr(10), chr(13))):
+            raise ManagementRequestRejected(
+                status=401,
+                request_id=request_id,
+                message="No valid short-lived project access token was supplied",
+            )
+
+        resource_url, receipt_url = self._paths(
+            cluster_id=cluster_id,
+            project_id=project_id,
+            workload_id=workload_id,
+            request_id=request_id,
+        )
+        receipt = await self._json_read(
+            url=receipt_url,
+            token=token,
+            request_id=request_id,
+            missing_ok=True,
+        )
+        if receipt is None:
+            desired_before = await self._json_read(
+                url=resource_url,
+                token=token,
+                request_id=request_id,
+                missing_ok=True,
+            )
+            if desired_before is None:
+                raise ManagementRequestOutcomeUnknown(
+                    request_id,
+                    "Workload is absent but no owner-scoped release receipt exists; RELEASED is unproven",
+                )
+            actual_generation = desired_before.get("generation")
+            if type(actual_generation) is not int or actual_generation != expected_generation:
+                raise ManagementRequestRejected(
+                    status=412,
+                    request_id=request_id,
+                    message="Desired Workload Generation differs from the persisted release precondition",
+                )
+            self._validate_desired(
+                desired_before,
+                request=request,
+                cluster_id=cluster_id,
+                generation=expected_generation,
+            )
+            if desired_before.get("deleting") is True:
+                raise ManagementRequestOutcomeUnknown(
+                    request_id,
+                    "Workload deletion is already in progress without this release receipt; refusing to adopt an unknown operation",
+                )
+            try:
+                status, _ = await self._request(
+                    method="DELETE",
+                    url=resource_url,
+                    token=token,
+                    request_id=request_id,
+                    if_match=f'"{expected_generation}"',
+                )
+            except _ManagementTransportError as exc:
+                try:
+                    receipt = await self._json_read(
+                        url=receipt_url,
+                        token=token,
+                        request_id=request_id,
+                        missing_ok=True,
+                    )
+                except Exception as read_error:
+                    raise ManagementRequestOutcomeUnknown(
+                        request_id,
+                        f"Management DELETE transport failed ({exc.kind}); receipt recovery is inconclusive ({type(read_error).__name__})",
+                    ) from None
+                if receipt is None:
+                    raise ManagementRequestOutcomeUnknown(
+                        request_id,
+                        f"Management DELETE transport failed ({exc.kind}); no release receipt is visible yet",
+                    ) from None
+            else:
+                if status not in (202, 204):
+                    try:
+                        receipt = await self._json_read(
+                            url=receipt_url,
+                            token=token,
+                            request_id=request_id,
+                            missing_ok=True,
+                        )
+                    except Exception as read_error:
+                        if status in (400, 401, 403, 404, 409, 412, 428, 422):
+                            raise ManagementRequestRejected(
+                                status=status,
+                                request_id=request_id,
+                                message=f"Management rejected the release with HTTP {status}",
+                            ) from None
+                        raise ManagementRequestOutcomeUnknown(
+                            request_id,
+                            f"Management DELETE returned HTTP {status}; receipt recovery is inconclusive ({type(read_error).__name__})",
+                        ) from None
+                    if receipt is None:
+                        if status in (400, 401, 403, 404, 409, 412, 428, 422):
+                            raise ManagementRequestRejected(
+                                status=status,
+                                request_id=request_id,
+                                message=f"Management rejected the release with HTTP {status}",
+                            )
+                        raise ManagementRequestOutcomeUnknown(
+                            request_id,
+                            f"Management DELETE returned HTTP {status} without an authoritative receipt",
+                        )
+                else:
+                    receipt = await self._json_read(
+                        url=receipt_url,
+                        token=token,
+                        request_id=request_id,
+                        missing_ok=True,
+                    )
+                    if receipt is None:
+                        raise ManagementRequestOutcomeUnknown(
+                            request_id,
+                            "Management DELETE returned accepted but its owner-scoped receipt is not visible yet",
+                        )
+
+        assert receipt is not None
+        generation = self._validate_release_receipt(
+            receipt,
+            release_request=release_request,
+            cluster_id=cluster_id,
+        )
+        desired = await self._json_read(
+            url=resource_url,
+            token=token,
+            request_id=request_id,
+            missing_ok=True,
+        )
+        if desired is not None:
+            if desired.get("generation") != generation:
+                raise ManagementProtocolError("Desired Generation changed after the release receipt committed")
+            self._validate_desired(
+                desired,
+                request=request,
+                cluster_id=cluster_id,
+                generation=generation,
+            )
+
+        # ComputeAllocation v0.1 retains the original CREATE requestId. The
+        # separate release key remains on the Run and in the Management receipt.
+        allocation: dict[str, Any] = {
+            "apiVersion": "compute.allocation/v0.1",
+            "requestId": request["requestId"],
+            "projectId": project_id,
+            "computePoolId": pool_id,
+            "workloadId": workload_id,
+            "generation": generation,
+            "clusterId": cluster_id,
+            "provider": provider,
+            "providerBindingGeneration": binding_generation,
+            "state": "RELEASING",
+            "observedGeneration": 0,
+            "providerRefs": [],
+            "conditions": [],
+            "evidenceRefs": [],
+        }
+        if self.observer is not None:
+            observation = await self.observer.observe(
+                request=copy_json(request),
+                binding=dict(binding),
+                receipt=dict(receipt),
+                desired=copy_json(desired) if desired is not None else None,
+            )
+            if observation is not None:
+                if not isinstance(observation, Mapping):
+                    raise ManagementProtocolError("Compute release observer returned a non-object")
+                identity = {
+                    "requestId": request["requestId"],
+                    "projectId": project_id,
+                    "computePoolId": pool_id,
+                    "workloadId": workload_id,
+                    "generation": generation,
+                    "clusterId": cluster_id,
+                    "provider": provider,
+                    "providerBindingGeneration": binding_generation,
+                }
+                for key, expected in identity.items():
+                    if key in observation and observation[key] != expected:
+                        raise ManagementProtocolError(f"Independent release observation identity mismatch for {key}")
+                observed_state = observation.get("state")
+                if observed_state == "RELEASED" and desired is not None:
+                    raise ManagementProtocolError(
+                        "release observer claimed RELEASED while the Desired Workload still exists"
+                    )
+                for key in ("state", "observedGeneration", "providerRefs", "conditions", "evidenceRefs"):
+                    if key in observation:
+                        allocation[key] = copy_json(observation[key])
+        return allocation
+
 
     async def submit_or_reconcile(
         self,
