@@ -356,6 +356,10 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
 
                     description = await handle.describe()
                     assert getattr(description.status, "name", "") == "RUNNING"
+                    execution = getattr(description, "execution", None)
+                    temporal_execution_run_id = getattr(execution, "run_id", None)
+                    assert isinstance(temporal_execution_run_id, str) and temporal_execution_run_id
+                    assert recovered["workflow_ref"]["run_id"] == temporal_execution_run_id
                     history = await handle.fetch_history()
                     events = list(getattr(history, "events", []))
                     if not events and getattr(history, "history", None) is not None:
@@ -388,7 +392,7 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
                         "start_operation_id": operation_id,
                         "workflow_id": workflow_id,
                         "temporal_status_after_recovery": getattr(description.status, "name", str(description.status)),
-                        "temporal_execution_run_id": recovered["workflow_ref"].get("run_id"),
+                        "temporal_execution_run_id": temporal_execution_run_id,
                         "workflow_execution_started_event_count": len(started),
                         "duplicate_start": "rejected",
                         "caller_exit": "SIGKILL",
