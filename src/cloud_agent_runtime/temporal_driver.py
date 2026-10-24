@@ -52,6 +52,21 @@ def _workflow_status_name(status: Any) -> str:
     return value
 
 
+def _execution_run_id(description: Any) -> str | None:
+    """Return the concrete execution run ID from a verified describe response."""
+    execution = (
+        description.get("execution")
+        if isinstance(description, dict)
+        else getattr(description, "execution", None)
+    )
+    run_id = (
+        execution.get("run_id")
+        if isinstance(execution, dict)
+        else getattr(execution, "run_id", None)
+    )
+    return run_id if isinstance(run_id, str) and run_id.strip() else None
+
+
 def _workflow_is_terminal(status: Any) -> bool:
     return _workflow_status_name(status) in _TERMINAL_WORKFLOW_STATUSES
 
@@ -124,6 +139,7 @@ class TemporalWorkflowDriver:
             runtime_run_id
         )
 
+        description = None
         try:
             from temporalio.common import WorkflowIDReusePolicy
             from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -184,14 +200,15 @@ class TemporalWorkflowDriver:
                     f"{workflow_id} status={_workflow_status_name(status)}"
                 )
 
+        resolved_run_id = (
+            getattr(handle, "first_execution_run_id", None)
+            or getattr(handle, "result_run_id", None)
+            or _execution_run_id(description)
+        )
         return WorkflowRef(
             provider=self.name,
             workflow_id=workflow_id,
-            run_id=getattr(
-                handle,
-                "first_execution_run_id",
-                None,
-            ),
+            run_id=resolved_run_id,
         )
 
     async def reconcile_start(
@@ -237,7 +254,13 @@ class TemporalWorkflowDriver:
         return WorkflowRef(
             provider=self.name,
             workflow_id=workflow_id,
-            run_id=getattr(handle, "first_execution_run_id", None),
+            # get_workflow_handle has no run ID unless one was supplied. After
+            # an ambiguous start ACK, persist the execution observed by describe
+            # instead of leaving the canonical WorkflowRef with a null run ID.
+            run_id=(
+                getattr(handle, "first_execution_run_id", None)
+                or _execution_run_id(description)
+            ),
         )
 
     async def signal(
