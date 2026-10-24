@@ -43,6 +43,14 @@ See:
 - [Evidence archive](docs/evidence-object-store.md) and [S3/MinIO compatibility](docs/s3-minio-evidence.md)
 - [AgentOS v3.2 Golden Slice](docs/agentos-v32-golden-slice.md)
 
+## Compute execution adapter (experimental)
+
+The new [compute execution adapter](docs/compute-execution.md) adds a profile-based routing slice: ordinary Worker/Sandbox/Workspace profiles stay on the existing runtime path without a Compute call; GPU Workloads use the same canonical Session/Run identities and a durably persisted, immutable `ComputeRequest` idempotency key before the injected client crosses the side-effect boundary.
+
+This is **not yet a production GPU integration**. The authenticated public Management API client, authoritative profile resolver, real PostgreSQL/Control Plane receipt reconciliation, and GPU provider acceptance are separate blockers. A returned `REQUESTED` or HTTP ACK is never promoted to `ALLOCATED` without independent ownership evidence.
+
+Focused contract tests: `pytest -q tests/test_compute_execution.py`.
+
 ## Quick start
 
 ```bash
