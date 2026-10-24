@@ -439,14 +439,18 @@ class AgentRuntime:
             try:
                 run = self.store.get_run(intent.run_id)
                 expected_ref = f"sandbox://{intent.provider}/{intent.sandbox_id}"
+                binding = getattr(run, "sandbox_binding", None)
+                # The convenience Run.sandbox_ref field is not sufficient
+                # authority to discard an allocation intent. The persisted
+                # binding, parent identities, and both references must agree.
                 canonical_bound = (
-                    run.sandbox_ref == expected_ref
-                    or (
-                        run.sandbox_binding is not None
-                        and run.sandbox_binding.provider == intent.provider
-                        and run.sandbox_binding.sandbox_id == intent.sandbox_id
-                        and run.sandbox_binding.sandbox_ref == expected_ref
-                    )
+                    getattr(run, "run_id", None) == intent.run_id
+                    and getattr(run, "session_id", None) == intent.session_id
+                    and binding is not None
+                    and getattr(binding, "provider", None) == intent.provider
+                    and getattr(binding, "sandbox_id", None) == intent.sandbox_id
+                    and getattr(binding, "sandbox_ref", None) == expected_ref
+                    and getattr(run, "sandbox_ref", None) == expected_ref
                 )
             except KeyError:
                 pass
