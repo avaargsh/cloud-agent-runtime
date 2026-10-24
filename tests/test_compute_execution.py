@@ -57,6 +57,9 @@ def route_binding(
 
 
 class StaticBindingClient:
+    def __init__(self) -> None:
+        self.binding_resolution_count = 0
+
     async def resolve_binding(
         self,
         *,
@@ -503,7 +506,7 @@ def test_allocation_rejects_stale_observation_generation() -> None:
                 "generation": 3,
                 "clusterId": "cluster-a",
                 "provider": "kueue",
-                "providerBindingGeneration": 2,
+                "providerBindingGeneration": 1,
                 "observedGeneration": 2,
                 "state": "ALLOCATED",
                 "providerRefs": [{
