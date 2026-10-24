@@ -56,18 +56,22 @@ def test_role_router_routes_to_distinct_least_privilege_transports():
     issue = RecordingTransport("issuer")
     introspect = RecordingTransport("introspector")
     revoke = RecordingTransport("revoker")
+    approval_revoke = RecordingTransport("approval-revoker")
     router = RoleRoutedAuthorityTransport(
         issuer=issue,
         introspector=introspect,
         revoker=revoke,
+        approval_revoker=approval_revoke,
     )
 
     router.request("POST", "/v1/workload-credentials:issue", {"request_id": "r1"})
     router.request("POST", "/v1/workload-credentials:introspect", {"access_token": "t"})
     router.request("POST", "/v1/workload-credentials:revoke-run", {"run_id": "run1"})
+    router.request("POST", "/v1/workload-credentials:revoke-approval", {"approval_id": "approval1"})
     assert len(issue.calls) == 1
     assert len(introspect.calls) == 1
     assert len(revoke.calls) == 1
+    assert len(approval_revoke.calls) == 1
 
     with pytest.raises(RuntimeError, match="not assigned"):
         router.request("POST", "/v1/unknown-privileged-route", {})
@@ -78,8 +82,9 @@ def test_role_router_rejects_transport_reuse():
     with pytest.raises(ValueError, match="must be distinct"):
         RoleRoutedAuthorityTransport(
             issuer=shared,
-            introspector=shared,
+            introspector=RecordingTransport("introspector"),
             revoker=RecordingTransport("revoker"),
+            approval_revoker=shared,
         )
 
 
