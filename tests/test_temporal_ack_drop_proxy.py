@@ -294,7 +294,6 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
                         "default",
                         "--task-queue",
                         task_queue,
-                        "--hold-after-reconcile",
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
@@ -355,6 +354,7 @@ def test_tcp_proxy_drops_temporal_start_ack_then_sigkill_and_reconcile(tmp_path)
                         "default",
                         "--task-queue",
                         task_queue,
+                        "--hold-after-reconcile",
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
