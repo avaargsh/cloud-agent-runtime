@@ -54,6 +54,9 @@ class RecordingComputeClient:
             run = self.store.get_run(request["correlation"]["runId"])
             assert run.compute_request is not None
             assert run.compute_request["requestId"] == request["requestId"]
+        # Ensure concurrent router calls interleave after reading intent. Both
+        # clients should observe the same atomically committed request ID.
+        await asyncio.sleep(0)
         self.requests.append(copy.deepcopy(request))
         return {
             "requestId": request["requestId"],
@@ -164,7 +167,7 @@ def test_gpu_request_and_idempotency_key_survive_sqlite_runtime_restart(tmp_path
     async def scenario() -> None:
         db_path = tmp_path / "compute-run.sqlite"
         store_before = SQLiteStore(db_path)
-        runtime_before, session, run = runtime_with_run(store_before)
+        _runtime_before, session, run = runtime_with_run(store_before)
         client = RecordingComputeClient(store_before)
         router_before = ExecutionProfileRouter(store=store_before, compute_client=client)
         gpu_profile = profile(
