@@ -66,7 +66,7 @@ jobs:
           live_external_provider_side_effect_ack_loss=NOT RUN
           live_provider_cleanup_ack_loss=NOT RUN
           production_cluster_cleanup_acceptance=BLOCKED until the deployed provider and target cluster are available
-          note=The TCP proxy test uses Temporal SDK test service; it is an actual forwarded-request/response-drop fault but not production-server/provider acceptance.
+          note=The TCP proxy and SIGKILL tests use the full local Temporal CLI dev server with local SQLite persistence; this is stronger than the legacy test service but is not production Temporal-server/provider acceptance.
           EOF
           if [ -f recovery-report/temporal-ack-drop-evidence.json ]; then
             cat recovery-report/temporal-ack-drop-evidence.json
