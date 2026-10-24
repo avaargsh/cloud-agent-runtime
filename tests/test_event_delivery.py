@@ -8,7 +8,6 @@ from cloud_agent_runtime.event_inbox import EventConflictError, EventEnvelope, S
 from cloud_agent_runtime.models import Run, RunStatus, Session
 from cloud_agent_runtime.store import SQLiteStore
 from cloud_agent_runtime.workflow import WorkflowRef
-from cloud_agent_runtime.workflow import WorkflowRef
 
 
 def seeded_inbox(tmp_path):
