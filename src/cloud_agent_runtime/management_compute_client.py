@@ -152,7 +152,7 @@ class ComputeAllocationObserver(Protocol):
         request: dict[str, Any],
         binding: Mapping[str, Any],
         receipt: Mapping[str, Any],
-        desired: Mapping[str, Any],
+        desired: Mapping[str, Any] | None,
     ) -> Mapping[str, Any] | None:
         """Return fresh independent allocation evidence, or None when not yet observable."""
         ...
