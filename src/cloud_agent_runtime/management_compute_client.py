@@ -549,6 +549,77 @@ class ManagementComputeClient:
             "providerBindingGeneration": binding_generation,
         }
 
+    async def verify_release_target(
+        self,
+        *,
+        request: Mapping[str, Any],
+        binding: Mapping[str, Any],
+        expected_generation: int,
+    ) -> None:
+        """Read-only authorization/Generation check before freezing a new release intent."""
+        self._validate_request(request)
+        if type(expected_generation) is not int or expected_generation < 1:
+            raise ManagementProtocolError("release preflight Generation must be positive")
+        project_id = request["projectId"]
+        pool_id = request["computePoolId"]
+        workload_id = request["workload"]["id"]
+        if not isinstance(binding, Mapping):
+            raise ManagementProtocolError("Persisted ComputePool route binding is missing")
+        if binding.get("projectId") != project_id or binding.get("computePoolId") != pool_id:
+            raise ManagementProtocolError("Persisted release preflight route does not match Project/Pool")
+        cluster_id = binding.get("clusterId")
+        if not isinstance(cluster_id, str) or not cluster_id:
+            raise ManagementProtocolError("Persisted release preflight route is missing clusterId")
+        if not isinstance(binding.get("provider"), str) or not binding.get("provider"):
+            raise ManagementProtocolError("Persisted release preflight route is missing provider")
+        if type(binding.get("providerBindingGeneration")) is not int or binding["providerBindingGeneration"] < 1:
+            raise ManagementProtocolError("Persisted release preflight route has invalid binding generation")
+        self._safe_path_segment(cluster_id, "clusterId")
+
+        token = await self.token_provider.access_token_for_project(project_id)
+        if not isinstance(token, str) or not token or any(c in token for c in (chr(10), chr(13))):
+            raise ManagementRequestRejected(
+                status=401,
+                request_id=request["requestId"],
+                message="No valid short-lived project access token was supplied",
+            )
+        resource_url, _ = self._paths(
+            cluster_id=cluster_id,
+            project_id=project_id,
+            workload_id=workload_id,
+            request_id=request["requestId"],
+        )
+        desired = await self._json_read(
+            url=resource_url,
+            token=token,
+            request_id=request["requestId"],
+            missing_ok=True,
+        )
+        if desired is None:
+            raise ManagementRequestRejected(
+                status=404,
+                request_id=request["requestId"],
+                message="Authorized Desired Workload is absent before a release operation was persisted",
+            )
+        generation = desired.get("generation")
+        if type(generation) is not int or generation != expected_generation:
+            raise ManagementRequestRejected(
+                status=412,
+                request_id=request["requestId"],
+                message="Authorized Desired Workload Generation differs from the release precondition",
+            )
+        self._validate_desired(
+            desired,
+            request=request,
+            cluster_id=cluster_id,
+            generation=expected_generation,
+        )
+        if desired.get("deleting") is True:
+            raise ManagementRequestOutcomeUnknown(
+                request["requestId"],
+                "Desired Workload is already deleting under an uncorrelated operation; release intent was not persisted",
+            )
+
     async def release_or_reconcile(
         self,
         release_request: dict[str, Any],
