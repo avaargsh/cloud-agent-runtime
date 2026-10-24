@@ -320,10 +320,13 @@ class ExecutionProfileRouter:
                     "persisted ComputeRequest has no frozen Pool-to-Cluster route binding"
                 )
             request_id = stored_id
+            # Validate the stored binding against the stored request, not the
+            # caller's new candidate. A changed caller Pool must reach the
+            # atomic intent comparison and fail as immutable intent drift.
             candidate_binding = _validate_binding(
                 run.compute_binding,
-                project_id=str(profile["projectId"]),
-                compute_pool_id=compute_pool_id,
+                project_id=str(run.compute_request["projectId"]),
+                compute_pool_id=str(run.compute_request["computePoolId"]),
             )
         else:
             # Resolve the trusted route before side effects. Its first value is
