@@ -122,6 +122,19 @@ class RecordingComputeClient(StaticBindingClient):
             "evidenceRefs": [],
         }
 
+    async def verify_release_target(
+        self,
+        *,
+        request: dict[str, Any],
+        binding: dict[str, Any],
+        expected_generation: int,
+    ) -> None:
+        assert expected_generation == 1
+        if self.store is not None:
+            run = self.store.get_run(request["correlation"]["runId"])
+            assert run.compute_request == request
+            assert run.compute_binding == binding
+
     async def release_or_reconcile(
         self,
         release_request: dict[str, Any],
