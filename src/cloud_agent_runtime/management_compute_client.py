@@ -434,10 +434,10 @@ class ManagementComputeClient:
                         request_id=request_id,
                         missing_ok=True,
                     )
-                except ManagementRequestOutcomeUnknown:
+                except Exception as read_error:
                     raise ManagementRequestOutcomeUnknown(
                         request_id,
-                        f"Management PUT transport failed ({exc.kind}); receipt is not yet readable",
+                        f"Management PUT transport failed ({exc.kind}); receipt recovery is inconclusive ({type(read_error).__name__})",
                     ) from None
                 if receipt is None:
                     raise ManagementRequestOutcomeUnknown(
@@ -455,7 +455,7 @@ class ManagementComputeClient:
                             request_id=request_id,
                             missing_ok=True,
                         )
-                    except ManagementRequestOutcomeUnknown:
+                    except Exception as read_error:
                         if status in (400, 401, 403, 404, 409, 412, 422):
                             raise ManagementRequestRejected(
                                 status=status,
@@ -464,7 +464,7 @@ class ManagementComputeClient:
                             ) from None
                         raise ManagementRequestOutcomeUnknown(
                             request_id,
-                            f"Management PUT returned HTTP {status}; commit outcome is unknown",
+                            f"Management PUT returned HTTP {status}; receipt recovery is inconclusive ({type(read_error).__name__})",
                         ) from None
                     if receipt is None:
                         if status in (400, 401, 403, 404, 409, 412, 422):
