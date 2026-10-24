@@ -38,6 +38,15 @@ class RuntimeStore(Protocol):
         ...
 
 
+    def persist_compute_release_request(
+        self,
+        run_id: str,
+        candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Atomically persist a distinct, immutable release intent before DELETE."""
+        ...
+
+
 
 def _same_compute_intent(left: dict[str, Any], right: dict[str, Any]) -> bool:
     # Racing retries may generate different candidate request IDs. Compare
@@ -51,6 +60,45 @@ def _same_compute_intent(left: dict[str, Any], right: dict[str, Any]) -> bool:
         if key not in {"requestId", "intentDigest"}
     }
     return left_intent == right_intent
+
+
+def _same_release_intent(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_intent = {
+        key: value for key, value in left.items()
+        if key not in {"requestId", "intentDigest"}
+    }
+    right_intent = {
+        key: value for key, value in right.items()
+        if key not in {"requestId", "intentDigest"}
+    }
+    return left_intent == right_intent
+
+
+def _validate_release_link(run: Run, candidate: dict[str, Any]) -> None:
+    source = run.compute_request
+    if source is None or run.compute_binding is None:
+        raise ValueError("cannot persist release intent without a committed ComputeRequest and route binding")
+    source_id = source.get("requestId")
+    release_id = candidate.get("requestId")
+    if not isinstance(source_id, str) or source_id != candidate.get("sourceRequestId"):
+        raise ValueError("release sourceRequestId does not match the immutable create request")
+    if not isinstance(release_id, str) or release_id == source_id:
+        raise ValueError("release requestId must be distinct from the create requestId")
+    workload = source.get("workload")
+    if not isinstance(workload, dict):
+        raise ValueError("persisted ComputeRequest workload is malformed")
+    expected = {
+        "projectId": source.get("projectId"),
+        "computePoolId": source.get("computePoolId"),
+        "workloadId": workload.get("id"),
+        "correlation": source.get("correlation"),
+    }
+    for field, value in expected.items():
+        if candidate.get(field) != value:
+            raise ValueError(f"release intent {field} does not match the persisted create request")
+    generation = candidate.get("expectedGeneration")
+    if type(generation) is not int or generation < 1:
+        raise ValueError("release intent expectedGeneration must be a positive server-issued Generation")
 
 
 class InMemoryStore:
@@ -88,9 +136,10 @@ class InMemoryStore:
             if existing is not None and (
                 existing.compute_request != run.compute_request
                 or existing.compute_binding != run.compute_binding
+                or existing.compute_release_request != run.compute_release_request
             ):
                 raise ValueError(
-                    "compute request and route binding can only be initialized through atomic persistence"
+                    "compute create/release intents and route binding can only be initialized through atomic persistence"
                 )
             self.runs[run.run_id] = deepcopy(run)
 
@@ -124,6 +173,26 @@ class InMemoryStore:
             run.compute_binding = deepcopy(binding)
             self.runs[run_id] = run
             return deepcopy(run.compute_request), deepcopy(run.compute_binding)
+
+
+    def persist_compute_release_request(
+        self,
+        run_id: str,
+        candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        with self._lock:
+            try:
+                run = deepcopy(self.runs[run_id])
+            except KeyError as exc:
+                raise KeyError(f"unknown run: {run_id}") from exc
+            _validate_release_link(run, candidate)
+            if run.compute_release_request is not None:
+                if not _same_release_intent(run.compute_release_request, candidate):
+                    raise ValueError("compute release intent is immutable for a Run")
+                return deepcopy(run.compute_release_request)
+            run.compute_release_request = deepcopy(candidate)
+            self.runs[run_id] = run
+            return deepcopy(run.compute_release_request)
 
 
 class SQLiteStore:
@@ -221,9 +290,10 @@ class SQLiteStore:
                 if (
                     existing.compute_request != run.compute_request
                     or existing.compute_binding != run.compute_binding
+                    or existing.compute_release_request != run.compute_release_request
                 ):
                     raise ValueError(
-                        "compute request and route binding can only be initialized through atomic persistence"
+                        "compute create/release intents and route binding can only be initialized through atomic persistence"
                     )
             self._connection.execute(
                 """
@@ -283,6 +353,37 @@ class SQLiteStore:
                 (payload, run_id),
             )
             return deepcopy(run.compute_request), deepcopy(run.compute_binding)
+
+    def persist_compute_release_request(
+        self,
+        run_id: str,
+        candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            row = self._connection.execute(
+                "SELECT payload FROM runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown run: {run_id}")
+            run = run_from_dict(json.loads(row[0]))
+            _validate_release_link(run, candidate)
+            if run.compute_release_request is not None:
+                if not _same_release_intent(run.compute_release_request, candidate):
+                    raise ValueError("compute release intent is immutable for a Run")
+                return deepcopy(run.compute_release_request)
+            run.compute_release_request = deepcopy(candidate)
+            payload = json.dumps(
+                run_to_dict(run),
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            self._connection.execute(
+                "UPDATE runs SET payload = ? WHERE run_id = ?",
+                (payload, run_id),
+            )
+            return deepcopy(run.compute_release_request)
 
     def close(self) -> None:
         self._connection.close()
