@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from time import time as wall_time
 from uuid import uuid4
 
 from .contracts import (
@@ -19,7 +20,7 @@ from .models import (
     SessionStatus,
 )
 from .sandbox import Sandbox, SandboxProvider, SandboxStatus
-from .store import InMemoryStore, RuntimeStore
+from .store import InMemoryStore, RuntimeStore, SandboxAllocationIntent
 from .workflow import WorkflowDriver
 
 
@@ -38,6 +39,9 @@ class AgentRuntime:
         self.workflow_driver = workflow_driver
         self._sandboxes: dict[str, Sandbox] = {}
         self._cleanup_ack_unknown_once = False
+        # Retry durable cleanup after a process restart. An allocation still in
+        # progress is protected by its bounded stale-intent window.
+        self.reconcile_sandbox_allocation_intents()
 
     @staticmethod
     def _transition_run(
@@ -378,6 +382,97 @@ class AgentRuntime:
 
         return run
 
+    def reconcile_sandbox_allocation_intents(
+        self,
+        *,
+        stale_after_seconds: float = 300.0,
+        now: float | None = None,
+    ) -> int:
+        """Retry orphan cleanup with durable ownership and independent Gone proof.
+
+        "allocating" intents are not reaped until their bounded stale window
+        expires, avoiding misclassification of concurrent/in-flight allocations.
+        "cleanup_pending" intents are retried immediately. An intent is removed
+        only after canonical Run binding proves ownership was committed, or a
+        separate provider observation proves the Sandbox is Gone.
+        """
+        list_intents = getattr(self.store, "list_allocation_intents", None)
+        save_intent = getattr(self.store, "save_allocation_intent", None)
+        delete_intent = getattr(self.store, "delete_allocation_intent", None)
+        if not (
+            callable(list_intents)
+            and callable(save_intent)
+            and callable(delete_intent)
+        ):
+            return 0
+
+        if self.sandbox_provider is None:
+            return 0
+        current_time = wall_clock() if now is None else now
+        reconciled = 0
+        for intent in list_intents():
+            if intent.provider != self.sandbox_provider.name:
+                # A different provider may own this resource; never dispatch
+                # cleanup to a provider chosen by stale or untrusted state.
+                continue
+
+            canonical_bound = False
+            try:
+                run = self.store.get_run(intent.run_id)
+                expected_ref = f"sandbox://{intent.provider}/{intent.sandbox_id}"
+                canonical_bound = (
+                    run.sandbox_ref == expected_ref
+                    or (
+                        run.sandbox_binding is not None
+                        and run.sandbox_binding.provider == intent.provider
+                        and run.sandbox_binding.sandbox_id == intent.sandbox_id
+                        and run.sandbox_binding.sandbox_ref == expected_ref
+                    )
+                )
+            except KeyError:
+                pass
+
+            if canonical_bound:
+                # The process may have crashed after persisting the Run but
+                # before deleting the temporary intent. Canonical ownership
+                # takes precedence over the stale allocation marker.
+                delete_intent(intent.provider, intent.sandbox_id)
+                reconciled += 1
+                continue
+
+            age = max(0.0, current_time - intent.updated_at)
+            if intent.state == "allocating" and age < stale_after_seconds:
+                continue
+
+            cleanup_intent = SandboxAllocationIntent(
+                run_id=intent.run_id,
+                session_id=intent.session_id,
+                provider=intent.provider,
+                sandbox_id=intent.sandbox_id,
+                state="cleanup_pending",
+                updated_at=current_time,
+            )
+            try:
+                # Persist cleanup ownership before calling the external API.
+                save_intent(cleanup_intent)
+                retired = Sandbox(
+                    sandbox_id=intent.sandbox_id,
+                    provider=intent.provider,
+                    status=SandboxStatus.ALLOCATED,
+                    session_id=intent.session_id,
+                )
+                self.sandbox_provider.terminate(retired)
+                observe_gone = getattr(self.sandbox_provider, "is_gone", None)
+                if not callable(observe_gone) or observe_gone(intent.sandbox_id) is not True:
+                    continue
+                delete_intent(intent.provider, intent.sandbox_id)
+                reconciled += 1
+            except Exception:
+                # Provider errors, timeouts, and ambiguous acknowledgements
+                # leave the exact identity durable for the next reconciliation.
+                continue
+        return reconciled
+
     def create_session(
         self,
         *,
@@ -423,19 +518,76 @@ class AgentRuntime:
             else:
                 raise ValueError(f"run already exists: {run_id}")
 
+        # Opportunistically retry prior cleanup work before creating new resources.
+        self.reconcile_sandbox_allocation_intents()
+
         owned_sandbox: Sandbox | None = None
+        allocation_intent: SandboxAllocationIntent | None = None
         resolved_sandbox_ref = sandbox_ref
         sandbox_binding: SandboxBinding | None = None
 
         if sandbox_ref is None and self.sandbox_provider is not None:
-            allocated = self.sandbox_provider.allocate()
+            allocate_with_id = getattr(
+                self.sandbox_provider,
+                "allocate_with_id",
+                None,
+            )
+            save_intent = getattr(self.store, "save_allocation_intent", None)
+            delete_intent = getattr(self.store, "delete_allocation_intent", None)
+            list_intents = getattr(self.store, "list_allocation_intents", None)
+            if (
+                callable(allocate_with_id)
+                and callable(save_intent)
+                and callable(delete_intent)
+                and callable(list_intents)
+            ):
+                # Assign the Sandbox ID and durably record its owner before the
+                # first Kubernetes side effect can create a Namespace.
+                sandbox_id = f"agent-sandbox-{uuid4().hex[:12]}"
+                allocation_intent = SandboxAllocationIntent(
+                    run_id=run_id,
+                    session_id=session_id,
+                    provider=self.sandbox_provider.name,
+                    sandbox_id=sandbox_id,
+                    state="allocating",
+                    updated_at=wall_clock(),
+                )
+                save_intent(allocation_intent)
+                try:
+                    allocated = allocate_with_id(sandbox_id)
+                except Exception:
+                    save_intent(SandboxAllocationIntent(
+                        run_id=run_id,
+                        session_id=session_id,
+                        provider=self.sandbox_provider.name,
+                        sandbox_id=sandbox_id,
+                        state="cleanup_pending",
+                        updated_at=wall_clock(),
+                    ))
+                    raise
+            else:
+                # Preserve compatibility for third-party providers without the
+                # recoverable-ID extension; they do not claim this guarantee.
+                allocated = self.sandbox_provider.allocate()
+
             try:
                 owned_sandbox = self.sandbox_provider.bind(
                     allocated,
                     session_id=session_id,
                 )
             except Exception:
-                self._best_effort_terminate(allocated)
+                if allocation_intent is not None:
+                    save_intent(SandboxAllocationIntent(
+                        run_id=run_id,
+                        session_id=session_id,
+                        provider=allocation_intent.provider,
+                        sandbox_id=allocation_intent.sandbox_id,
+                        state="cleanup_pending",
+                        updated_at=wall_clock(),
+                    ))
+                    self._best_effort_terminate(allocated)
+                else:
+                    self._best_effort_terminate(allocated)
                 raise
 
             resolved_sandbox_ref = self._sandbox_ref(owned_sandbox)
@@ -470,9 +622,24 @@ class AgentRuntime:
             self.store.save_run(run)
         except Exception:
             if owned_sandbox is not None:
+                if allocation_intent is not None:
+                    save_intent(SandboxAllocationIntent(
+                        run_id=run_id,
+                        session_id=session_id,
+                        provider=allocation_intent.provider,
+                        sandbox_id=allocation_intent.sandbox_id,
+                        state="cleanup_pending",
+                        updated_at=wall_clock(),
+                    ))
                 self._best_effort_terminate(owned_sandbox)
                 self._sandboxes.pop(run_id, None)
             raise
+
+        if allocation_intent is not None:
+            # The canonical Run now owns the Sandbox. If this deletion fails or
+            # the process crashes first, reconciliation observes the binding
+            # and safely retires only this temporary intent.
+            delete_intent(allocation_intent.provider, allocation_intent.sandbox_id)
 
         if self.workflow_driver is None:
             return run
