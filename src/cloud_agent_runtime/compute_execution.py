@@ -140,32 +140,74 @@ def _validate_allocation(
             raise RuntimeError(
                 f"Control Plane allocation identity mismatch for {field}; fail closed"
             )
+
+    generation = allocation.get("generation")
+    observed_generation = allocation.get("observedGeneration")
+    if type(generation) is not int or generation < 1:
+        raise RuntimeError("Control Plane returned an invalid desired generation")
+    if type(observed_generation) is not int or observed_generation < 0:
+        raise RuntimeError("Control Plane returned an invalid observed generation")
+
+    cluster_id = allocation.get("clusterId")
+    provider = allocation.get("provider")
+    binding_generation = allocation.get("providerBindingGeneration")
+    if not isinstance(cluster_id, str) or not cluster_id:
+        raise RuntimeError("Control Plane allocation is missing clusterId")
+    if not isinstance(provider, str) or not provider:
+        raise RuntimeError("Control Plane allocation is missing provider identity")
+    if type(binding_generation) is not int or binding_generation < 1:
+        raise RuntimeError("Control Plane allocation has an invalid provider binding generation")
+
     state = allocation.get("state")
     if state not in _COMPUTE_STATES:
         raise RuntimeError("Control Plane returned an unknown ComputeAllocation state")
+    provider_refs = allocation.get("providerRefs", [])
     conditions = allocation.get("conditions", [])
     evidence_refs = allocation.get("evidenceRefs", [])
+    if not isinstance(provider_refs, list) or not isinstance(conditions, list):
+        raise RuntimeError("Control Plane allocation has malformed provider refs or conditions")
+    if not isinstance(evidence_refs, list):
+        raise RuntimeError("Control Plane allocation has malformed evidence refs")
+
+    if state in {"ALLOCATED", "RELEASED"} and observed_generation != generation:
+        raise RuntimeError(
+            f"Control Plane claimed {state} with stale observedGeneration "
+            f"{observed_generation} for desired generation {generation}"
+        )
+
     if state == "ALLOCATED":
         owns = any(
             isinstance(condition, Mapping)
             and condition.get("type") == "OwnershipProven"
-            and condition.get("status") in (True, "True", "TRUE")
+            and condition.get("status") == "TRUE"
             for condition in conditions
         )
-        if not allocation.get("providerRefs") or not owns or not evidence_refs:
+        if not provider_refs or not owns or not evidence_refs:
             raise RuntimeError(
                 "Control Plane claimed ALLOCATED without current ownership evidence"
             )
+        image_digest = request["workload"]["image"].rsplit("@", 1)[1]
+        for reference in provider_refs:
+            if not isinstance(reference, Mapping):
+                raise RuntimeError("Control Plane returned a malformed provider reference")
+            for field in ("kind", "namespace", "name", "uid", "resourceVersion", "generation", "ownershipProofRef"):
+                if field not in reference or reference[field] in (None, ""):
+                    raise RuntimeError(f"Provider reference is missing {field}")
+            if type(reference["generation"]) is not int or reference["generation"] < 1:
+                raise RuntimeError("Provider reference has an invalid object generation")
+            if reference["kind"] in {"Job", "Pod"}:
+                if reference.get("imageDigest") != image_digest:
+                    raise RuntimeError("Provider reference image digest does not match requested workload")
     if state == "RELEASED":
         cleaned = any(
             isinstance(condition, Mapping)
             and condition.get("type") == "CleanupComplete"
-            and condition.get("status") in (True, "True", "TRUE")
+            and condition.get("status") == "TRUE"
             for condition in conditions
         )
-        if not cleaned or not evidence_refs:
+        if provider_refs or not cleaned or not evidence_refs:
             raise RuntimeError(
-                "Control Plane claimed RELEASED without cleanup evidence"
+                "Control Plane claimed RELEASED while cleanup/absence evidence is incomplete"
             )
     return copy.deepcopy(dict(allocation))
 
