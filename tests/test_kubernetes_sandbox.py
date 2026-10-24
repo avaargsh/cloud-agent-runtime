@@ -51,7 +51,7 @@ class FakeKubectl:
                 "",
                 "",
             )
-        if args[:2] == ("delete", "namespace"):
+        if args[:2] == ["delete", "namespace"]:
             namespace = args[2]
             self.namespaces.discard(namespace)
             self.pods = {
@@ -127,7 +127,7 @@ def test_terminate_is_orphan_cleanup_safe():
     ]
     namespace_deletes = [
         args for args, _ in kubectl.calls
-        if args[:2] == ["delete", "namespace"]
+        if args[:2] == ("delete", "namespace")
     ]
     assert namespaced_deletes == []
     assert len(namespace_deletes) == 1
