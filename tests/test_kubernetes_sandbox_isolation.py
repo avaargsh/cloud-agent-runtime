@@ -1,7 +1,11 @@
 import json
 from subprocess import CompletedProcess
 
+import pytest
+
+from cloud_agent_runtime import AgentRuntime, SQLiteStore
 from cloud_agent_runtime.kubernetes_sandbox import KubectlResult, KubernetesSandboxProvider
+from cloud_agent_runtime.store import SandboxAllocationIntent
 
 
 class FakeKubectl:
@@ -185,3 +189,82 @@ def test_kubectl_process_deadline_covers_server_wait_timeout(monkeypatch):
 
     provider._run_kubectl(["get", "namespace", "sandbox-a", "-o", "name"])
     assert observed["timeout"] == 15.0
+
+
+
+def test_failed_allocation_cleanup_survives_store_reopen(tmp_path):
+    kubectl = FakeKubectl()
+    provider = KubernetesSandboxProvider(kubectl=kubectl)
+    database = tmp_path / "orphan-allocation.db"
+    store = SQLiteStore(database)
+    runtime = AgentRuntime(store=store, sandbox_provider=provider)
+    session = runtime.create_session(
+        agent_id="coding-agent",
+        release_id="coding-agent-v1",
+        tenant_id="tenant-a",
+    )
+
+    # NetworkPolicy admission fails after Namespace creation, and the
+    # provider's best-effort Namespace deletion also fails. The intent must
+    # remain durable and address the exact same Sandbox ID.
+    kubectl.fail_policy = True
+    kubectl.fail_namespace_delete_once = True
+    with pytest.raises(RuntimeError, match="network policy admission denied"):
+        runtime.start_run(session_id=session.session_id)
+
+    intents = store.list_allocation_intents()
+    assert len(intents) == 1
+    intent = intents[0]
+    assert intent.run_id
+    assert intent.session_id == session.session_id
+    assert intent.provider == "kubernetes"
+    assert intent.state == "cleanup_pending"
+    namespace = provider._namespace_for(intent.sandbox_id)
+    assert namespace in kubectl.namespaces
+    assert not kubectl.pods
+
+    store.close()
+    reopened = SQLiteStore(database)
+    # Runtime startup retries the exact durable cleanup identity. It removes
+    # the intent only after independently observing Namespace absence.
+    AgentRuntime(store=reopened, sandbox_provider=provider)
+    assert namespace not in kubectl.namespaces
+    assert provider.is_gone(intent.sandbox_id) is True
+    assert reopened.list_allocation_intents() == []
+    reopened.close()
+
+
+def test_recent_allocation_intent_is_not_misclassified_as_orphan(tmp_path):
+    kubectl = FakeKubectl()
+    provider = KubernetesSandboxProvider(kubectl=kubectl)
+    runtime = AgentRuntime(
+        store=SQLiteStore(tmp_path / "concurrent-allocation.db"),
+        sandbox_provider=provider,
+    )
+    sandbox_id = "agent-sandbox-concurrent1"
+    sandbox = provider.allocate_with_id(sandbox_id)
+    intent = SandboxAllocationIntent(
+        run_id="run-in-flight",
+        session_id="session-in-flight",
+        provider="kubernetes",
+        sandbox_id=sandbox_id,
+        state="allocating",
+        updated_at=100.0,
+    )
+    runtime.store.save_allocation_intent(intent)
+
+    # Simulated competing allocation still within its bounded creation window:
+    # no delete call is allowed, and the ownership intent remains untouched.
+    reconciled = runtime.reconcile_sandbox_allocation_intents(
+        stale_after_seconds=300.0,
+        now=120.0,
+    )
+    assert reconciled == 0
+    assert provider._namespace_for(sandbox_id) in kubectl.namespaces
+    assert runtime.store.list_allocation_intents() == [intent]
+    assert not any(
+        args[:2] == ("delete", "namespace")
+        for args, _ in kubectl.calls
+    )
+    provider.terminate(sandbox)
+    runtime.store.close()
