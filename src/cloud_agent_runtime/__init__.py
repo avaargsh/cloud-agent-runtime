@@ -4,6 +4,11 @@ from .async_workflow import (
     AsyncWorkflowDriver,
     InMemoryAsyncWorkflowDriver,
 )
+from .compute_execution import (
+    ComputeProfileConflict,
+    ComputeResourceClient,
+    ExecutionProfileRouter,
+)
 from .contracts import (
     Approval,
     ApprovalStatus,
@@ -55,6 +60,31 @@ from .tool_contract import (
 )
 from .workflow import InMemoryWorkflowDriver, WorkflowRef
 
+_MANAGEMENT_COMPUTE_EXPORTS = frozenset({
+    "AccessTokenProvider",
+    "ComputeAllocationObserver",
+    "ComputePoolBindingResolver",
+    "ManagementComputeClient",
+    "ManagementProtocolError",
+    "ManagementRequestOutcomeUnknown",
+    "ManagementRequestRejected",
+})
+
+
+def __getattr__(name: str):
+    """Load HTTP/Management infrastructure exports only on explicit use.
+
+    Temporal imports the package initializer while constructing its workflow
+    sandbox. Eagerly importing urllib-based Management client code here brings
+    nondeterministic network infrastructure into the workflow import graph.
+    """
+    if name in _MANAGEMENT_COMPUTE_EXPORTS:
+        from . import management_compute_client
+
+        return getattr(management_compute_client, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     "AgentRuntime",
     "ArchivedEvidence",
@@ -62,10 +92,15 @@ __all__ = [
     "Approval",
     "ApprovalStatus",
     "ArtifactRef",
+    "AccessTokenProvider",
     "AsyncAgentRuntime",
     "AsyncWorkflowDriver",
     "Budget",
     "CapabilityBinding",
+    "ComputeProfileConflict",
+    "ComputeResourceClient",
+    "ComputeAllocationObserver",
+    "ComputePoolBindingResolver",
     "EventConflictError",
     "EventEnvelope",
     "SQLiteEventInbox",
@@ -77,10 +112,15 @@ __all__ = [
     "EvidenceObjectStore",
     "EvidenceRecord",
     "EvidenceRef",
+    "ExecutionProfileRouter",
     "InMemoryAsyncWorkflowDriver",
     "InMemoryObjectStore",
     "InMemorySandboxProvider",
     "InMemoryStore",
+    "ManagementComputeClient",
+    "ManagementProtocolError",
+    "ManagementRequestOutcomeUnknown",
+    "ManagementRequestRejected",
     "InMemoryWorkflowDriver",
     "KubernetesSandboxProvider",
     "LocalArtifactStore",
