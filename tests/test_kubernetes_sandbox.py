@@ -115,28 +115,29 @@ def test_terminate_is_orphan_cleanup_safe():
     sandbox = provider.allocate()
     provider.bind(sandbox, session_id="session-1")
 
-    namespace = provider._namespace_for(sandbox.sandbox_id)
     provider.terminate(sandbox)
-    # The second call observes an absent namespace and is idempotent.
+    # Namespace deletion is the policy-preserving cleanup barrier. A retry
+    # after the Namespace is absent must be a no-op and must not target stale
+    # namespaced resources.
     provider.terminate(sandbox)
 
+    namespaced_deletes = [
+        args for args, _ in kubectl.calls
+        if "delete" in args and args[args.index("delete") + 1] in ("pod", "networkpolicy")
+    ]
     namespace_deletes = [
         args for args, _ in kubectl.calls
-        if args[:2] == ("delete", "namespace")
+        if args[:2] == ["delete", "namespace"]
     ]
-    child_resource_deletes = [
-        args for args, _ in kubectl.calls
-        if "delete" in args
-        and len(args) > args.index("delete") + 1
-        and args[args.index("delete") + 1] in {"pod", "networkpolicy"}
-    ]
+    assert namespaced_deletes == []
     assert len(namespace_deletes) == 1
-    assert child_resource_deletes == []
-    assert "--wait=true" in namespace_deletes[0]
     assert "--ignore-not-found=true" in namespace_deletes[0]
+    assert "--wait=true" in namespace_deletes[0]
+    assert "--timeout=60s" in namespace_deletes[0]
     assert not kubectl.pods
     assert not kubectl.network_policies
-    assert namespace not in kubectl.namespaces
+    assert not kubectl.namespaces
+
 
 def test_sandbox_manifest_is_non_root_ephemeral_and_network_is_deny_all():
     kubectl = FakeKubectl()
