@@ -10,6 +10,11 @@ on:
       - "scripts/kind-sandbox-recovery-smoke.py"
       - "tests/test_kubernetes_sandbox.py"
       - "tests/test_kubernetes_sandbox_integration.py"
+      # Recovery-driver changes affect the recovery path exercised by this kind job.
+      - "src/cloud_agent_runtime/temporal_driver.py"
+      - "src/cloud_agent_runtime/recovery_probe.py"
+      - "tests/test_temporal_driver.py"
+      - "tests/test_temporal_ack_drop_proxy.py"
       - ".github/workflows/kind-sandbox-recovery.yml"
 
 jobs:
