@@ -195,11 +195,33 @@ class KubernetesSandboxProvider:
 
     def allocate(self) -> Sandbox:
         sandbox_id = f"agent-sandbox-{uuid4().hex[:12]}"
+        return self.allocate_with_id(sandbox_id)
+
+    def allocate_with_id(self, sandbox_id: str) -> Sandbox:
+        """Allocate a caller-assigned ID so Runtime can persist ownership first.
+
+        Runtime persists a cleanup intent before invoking this method. If an
+        API response is ambiguous, the same ID remains recoverable after a
+        process restart instead of disappearing inside this provider call.
+        """
+        if (
+            not sandbox_id
+            or len(sandbox_id) > 63
+            or sandbox_id.startswith("-")
+            or sandbox_id.endswith("-")
+            or any(
+                char not in "abcdefghijklmnopqrstuvwxyz0123456789-"
+                for char in sandbox_id
+            )
+        ):
+            raise ValueError("sandbox_id must be a Kubernetes DNS-label value")
+
         namespace = self._namespace_for(sandbox_id)
         self.ensure_namespace(namespace)
 
         # Create deny-all before the Pod can start. A policy error leaves no
-        # Pod and triggers best-effort namespace cleanup.
+        # Pod and triggers best-effort namespace cleanup. Runtime retains the
+        # pre-persisted allocation intent if cleanup is ambiguous or fails.
         try:
             self._check(
                 ["apply", "-f", "-"],
