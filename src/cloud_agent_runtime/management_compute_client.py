@@ -14,6 +14,62 @@ _REQUEST_ID = re.compile(r"^[0-9a-f]{32}$")
 _DIGEST_IMAGE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 _DNS_ID = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _go_json_dumps(value: Any, *, sort_keys: bool = False) -> str:
+    """Match encoding/json's compact HTML-escaping for receipt fingerprints."""
+    encoded = json.dumps(
+        value,
+        sort_keys=sort_keys,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return (
+        encoded.replace("&", r"\u0026")
+        .replace("<", r"\u003c")
+        .replace(">", r"\u003e")
+        .replace("\u2028", r"\u2028")
+        .replace("\u2029", r"\u2029")
+    )
+
+
+def _management_request_digest(
+    request: Mapping[str, Any],
+    *,
+    cluster_id: str,
+) -> str:
+    """Reproduce Management mutationFingerprint for this public PUT payload.
+
+    The server fingerprints method, resolved route/resource identity, CAS
+    generation, pool ID and the exact canonicalized spec; it intentionally does
+    not use the adapter-local ComputeRequest intentDigest or caller token.
+    """
+    workload = request["workload"]
+    spec: dict[str, Any] = {
+        "image": workload["image"],
+        "accelerator": dict(workload["accelerator"]),
+    }
+    if "command" in workload:
+        spec["command"] = list(workload["command"])
+    # The HTTP adapter emits the body with sort_keys=True, and Go's
+    # json.RawMessage compacts but preserves that field ordering in the digest.
+    spec = {key: spec[key] for key in sorted(spec)}
+    spec["accelerator"] = {
+        key: spec["accelerator"][key]
+        for key in sorted(spec["accelerator"])
+    }
+    fingerprint = {
+        "method": "PUT",
+        "cluster": cluster_id,
+        "project": request["projectId"],
+        "kind": "Workload",
+        "resourceId": workload["id"],
+        "expectedGeneration": workload["expectedGeneration"],
+        "poolId": request["computePoolId"],
+        "spec": spec,
+    }
+    return hashlib.sha256(_go_json_dumps(fingerprint).encode("utf-8")).hexdigest()
 
 
 class ManagementRequestOutcomeUnknown(RuntimeError):
@@ -309,8 +365,13 @@ class ManagementComputeClient:
         if type(generation) is not int or generation < 1:
             raise ManagementProtocolError("Management operation receipt has an invalid resultingGeneration")
         digest = receipt.get("requestDigest")
-        if not isinstance(digest, str) or not digest:
-            raise ManagementProtocolError("Management operation receipt is missing requestDigest")
+        if not isinstance(digest, str) or not _SHA256_HEX.fullmatch(digest):
+            raise ManagementProtocolError("Management operation receipt has an invalid requestDigest")
+        expected_digest = _management_request_digest(request, cluster_id=cluster_id)
+        if digest != expected_digest:
+            raise ManagementProtocolError(
+                "Management operation receipt requestDigest does not match this request"
+            )
         return generation
 
     def _validate_desired(
