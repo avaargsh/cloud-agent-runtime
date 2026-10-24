@@ -415,7 +415,7 @@ class ManagementComputeClient:
         self._safe_path_segment(cluster_id, "clusterId")
 
         token = await self.token_provider.access_token_for_project(project_id)
-        if not isinstance(token, str) or not token or any(c in token for c in "\\r\\n"):
+        if not isinstance(token, str) or not token or any(c in token for c in (chr(10), chr(13))):
             raise ManagementRequestRejected(
                 status=401,
                 request_id=request_id,
