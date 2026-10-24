@@ -198,12 +198,14 @@ class ExecutionProfileRouter:
         run_id: str,
         *,
         profile: Mapping[str, Any],
-        compute_pool_id: str,
-        image: str,
+        compute_pool_id: str | None = None,
+        image: str | None = None,
         command: list[str] | None = None,
     ) -> dict[str, Any] | None:
         run = self.store.get_run(run_id)
         session = self.store.get_session(run.session_id)
+        if profile.get("apiVersion") != "agent.execution-profile/v0.1":
+            raise ValueError("unsupported execution profile apiVersion")
         environment = profile.get("environment")
         accelerator = profile.get("accelerator")
         if not isinstance(accelerator, Mapping):
@@ -221,8 +223,10 @@ class ExecutionProfileRouter:
 
         if environment != "gpu-workload":
             raise ValueError("unsupported execution profile environment")
-        if profile.get("apiVersion") != "agent.execution-profile/v0.1":
-            raise ValueError("unsupported execution profile apiVersion")
+        if compute_pool_id is None:
+            raise ValueError("gpu-workload requires an authorized computePoolId")
+        if image is None:
+            raise ValueError("gpu-workload requires an immutable workload image")
         if run.compute_request is not None:
             stored_id = run.compute_request.get("requestId")
             if not isinstance(stored_id, str) or not _REQUEST_ID.fullmatch(stored_id):
