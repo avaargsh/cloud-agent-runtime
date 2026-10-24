@@ -52,6 +52,17 @@ class ComputeResourceClient(Protocol):
         ...
 
 
+    async def release_or_reconcile(
+        self,
+        release_request: dict[str, Any],
+        *,
+        request: Mapping[str, Any],
+        binding: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Release through the public Management API and prove cleanup independently."""
+        ...
+
+
 def _validate_binding(
     binding: Mapping[str, Any],
     *,
@@ -165,6 +176,49 @@ def _build_request(
     canonical = json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     request["intentDigest"] = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return request
+
+
+def _build_release_request(
+    *,
+    run: Run,
+    request: Mapping[str, Any],
+    request_id: str,
+    expected_generation: int,
+) -> dict[str, Any]:
+    if not _REQUEST_ID.fullmatch(request_id):
+        raise ValueError("release requestId must be exactly 32 lowercase hexadecimal characters")
+    source_id = request.get("requestId")
+    if not isinstance(source_id, str) or not _REQUEST_ID.fullmatch(source_id):
+        raise ValueError("source ComputeRequest requestId is invalid")
+    if request_id == source_id:
+        raise ValueError("release requestId must be distinct from the create requestId")
+    if type(expected_generation) is not int or expected_generation < 1:
+        raise ValueError("release expectedGeneration must be a positive server-issued Generation")
+    correlation = request.get("correlation")
+    if not isinstance(correlation, Mapping):
+        raise ValueError("source ComputeRequest correlation is malformed")
+    release_request: dict[str, Any] = {
+        "apiVersion": "compute.release-request/v0.1",
+        "requestId": request_id,
+        "sourceRequestId": source_id,
+        "projectId": request["projectId"],
+        "computePoolId": request["computePoolId"],
+        "workloadId": request["workload"]["id"],
+        "expectedGeneration": expected_generation,
+        "correlation": {
+            "agentId": correlation["agentId"],
+            "sessionId": run.session_id,
+            "runId": run.run_id,
+        },
+    }
+    canonical = json.dumps(
+        release_request,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    release_request["intentDigest"] = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return release_request
 
 
 def _validate_allocation(
@@ -282,6 +336,60 @@ class ExecutionProfileRouter:
             )
         self.store = store
         self.compute_client = compute_client
+
+    async def release(
+        self,
+        run_id: str,
+        *,
+        allocation: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Persist one release operation and reconcile it without changing create identity.
+
+        A DELETE receipt only proves that deletion was accepted by Management.
+        The client/observer may return RELEASED only after independently proving
+        Provider resource absence and durable cleanup/finalization evidence.
+        """
+        run = self.store.get_run(run_id)
+        request = run.compute_request
+        binding = run.compute_binding
+        if request is None or binding is None:
+            raise ComputeProfileConflict("Run has no persisted ComputeRequest/route to release")
+        if not isinstance(allocation, Mapping):
+            raise ValueError("allocation must be an observed ComputeAllocation object")
+        validated = _validate_allocation(allocation, request, binding)
+        state = validated["state"]
+        if state == "RELEASED" and run.compute_release_request is None:
+            raise ComputeProfileConflict(
+                "cannot accept RELEASED without a durable release request owned by this Run"
+            )
+        expected_generation = validated["generation"]
+        existing_release = run.compute_release_request
+        release_id = (
+            existing_release.get("requestId")
+            if isinstance(existing_release, Mapping)
+            else secrets.token_hex(16)
+        )
+        candidate = _build_release_request(
+            run=run,
+            request=request,
+            request_id=str(release_id),
+            expected_generation=expected_generation,
+        )
+        try:
+            release_request = self.store.persist_compute_release_request(run_id, candidate)
+        except ValueError as exc:
+            raise ComputeProfileConflict(str(exc)) from exc
+        if not callable(getattr(self.compute_client, "release_or_reconcile", None)):
+            raise TypeError("Compute client must implement release_or_reconcile for P0 lifecycle recovery")
+        result = await self.compute_client.release_or_reconcile(
+            copy.deepcopy(release_request),
+            request=copy.deepcopy(request),
+            binding=copy.deepcopy(binding),
+        )
+        if not isinstance(result, Mapping):
+            raise RuntimeError("Compute client returned a non-object release allocation")
+        return _validate_allocation(result, request, binding)
+
 
     async def dispatch(
         self,
